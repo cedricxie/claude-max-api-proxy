@@ -21,8 +21,11 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 export interface SubprocessOptions {
   model: ClaudeModel;
   sessionId?: string;
+  useResume?: boolean;
   cwd?: string;
   timeout?: number;
+  toolSystemPrompt?: string | null;
+  hasTools?: boolean;
 }
 
 export interface SubprocessEvents {
@@ -134,16 +137,27 @@ export class ClaudeSubprocess extends EventEmitter {
       "stream-json", // JSON streaming output
       "--verbose", // Required for stream-json
       "--include-partial-messages", // Enable streaming chunks
-      "--model",
-      options.model, // Model alias (opus/sonnet/haiku)
-      "--no-session-persistence", // Don't save sessions
-      prompt, // Pass prompt as argument (more reliable than stdin)
     ];
 
-    if (options.sessionId) {
-      args.push("--session-id", options.sessionId);
+    if (options.useResume && options.sessionId) {
+      // Resume existing session — Claude loads history from disk
+      args.push("--resume", options.sessionId);
+    } else {
+      args.push("--model", options.model);
+      if (options.sessionId) {
+        args.push("--session-id", options.sessionId);
+      }
     }
 
+    // When custom tools are provided, inject tool definitions via system prompt
+    // and disable built-in tools so Claude focuses on the custom ones.
+    // --tools is variadic, so use "--" to prevent it from consuming the prompt.
+    if (options.toolSystemPrompt) {
+      args.push("--append-system-prompt", options.toolSystemPrompt);
+      args.push("--tools", "", "--");
+    }
+
+    args.push(prompt); // Pass prompt as argument (more reliable than stdin)
     return args;
   }
 
