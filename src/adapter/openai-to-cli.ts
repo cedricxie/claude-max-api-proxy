@@ -232,11 +232,12 @@ export function openaiToCli(request: OpenAIChatRequest): CliInput {
       toolChoice.type === "function" &&
       toolChoice.function?.name
     ) {
-      // Force a specific tool — filter to just that tool
+      // Force a specific tool — filter to just that tool.
+      // If the named tool doesn't exist, expose nothing (same as "none").
       const forced = request.tools.filter(
         (t) => t.function.name === toolChoice.function.name
       );
-      tools = forced.length > 0 ? forced : request.tools;
+      tools = forced.length > 0 ? forced : null;
     } else {
       tools = request.tools;
     }
