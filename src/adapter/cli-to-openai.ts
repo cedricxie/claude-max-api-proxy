@@ -21,7 +21,8 @@ export function extractTextContent(message: ClaudeCliAssistant): string {
 
 /**
  * Parse <tool_call> blocks from Claude's text response.
- * Returns { text, toolCalls } where text has tool_call blocks removed.
+ * Returns { text, toolCalls } where text has only successfully parsed
+ * tool_call blocks removed. Malformed blocks are preserved in text.
  */
 export function parseToolCalls(text: string): {
   text: string;
@@ -29,14 +30,28 @@ export function parseToolCalls(text: string): {
 } {
   const toolCalls: OpenAIToolCall[] = [];
   const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  // Track offsets of successfully parsed blocks for removal
+  const parsedRanges: Array<{ start: number; end: number }> = [];
   let match: RegExpExecArray | null;
   let callIndex = 0;
 
   while ((match = TOOL_CALL_RE.exec(text)) !== null) {
     try {
       const parsed = JSON.parse(match[1]);
+
+      // Validate required fields
+      if (typeof parsed.name !== "string" || !parsed.name) {
+        console.error(
+          "[parseToolCalls] Missing or invalid 'name':",
+          match[1].slice(0, 200)
+        );
+        continue;
+      }
+
       toolCalls.push({
-        id: parsed.id || `call_${Date.now()}_${callIndex}`,
+        id: typeof parsed.id === "string" && parsed.id
+          ? parsed.id
+          : `call_${Date.now()}_${callIndex}`,
         type: "function",
         function: {
           name: parsed.name,
@@ -46,9 +61,10 @@ export function parseToolCalls(text: string): {
               : JSON.stringify(parsed.arguments || {}),
         },
       });
+      parsedRanges.push({ start: match.index, end: match.index + match[0].length });
       callIndex++;
-    } catch (e) {
-      // Failed to parse tool call JSON — leave it in text
+    } catch {
+      // Failed to parse — leave this block in text (don't add to parsedRanges)
       console.error(
         "[parseToolCalls] Failed to parse:",
         match[1].slice(0, 200)
@@ -56,14 +72,16 @@ export function parseToolCalls(text: string): {
     }
   }
 
-  // Remove parsed tool_call blocks from text
-  const cleanText =
-    toolCalls.length > 0
-      ? text
-          .replace(TOOL_CALL_RE, "")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim()
-      : text;
+  // Remove only successfully parsed blocks from text
+  let cleanText = text;
+  if (parsedRanges.length > 0) {
+    // Remove in reverse order to preserve offsets
+    for (let i = parsedRanges.length - 1; i >= 0; i--) {
+      const { start, end } = parsedRanges[i];
+      cleanText = cleanText.slice(0, start) + cleanText.slice(end);
+    }
+    cleanText = cleanText.replace(/\n{3,}/g, "\n\n").trim();
+  }
 
   return { text: cleanText, toolCalls };
 }
@@ -126,12 +144,10 @@ export function cliResultToOpenai(
   requestId: string,
   hasTools: boolean = false
 ): OpenAIChatResponse {
-  // Get model from modelUsage or default
   const modelName = result.modelUsage
     ? Object.keys(result.modelUsage)[0]
     : "claude-sonnet-4";
 
-  // Check for tool calls in the result text
   const resultText = result.result || "";
   const { text, toolCalls } = hasTools
     ? parseToolCalls(resultText)
@@ -173,7 +189,6 @@ export function cliResultToOpenai(
 
 /**
  * Normalize Claude model names to a consistent format
- * e.g., "claude-sonnet-4-5-20250929" -> "claude-sonnet-4"
  */
 function normalizeModelName(model: string): string {
   if (!model) return "claude-sonnet-4";

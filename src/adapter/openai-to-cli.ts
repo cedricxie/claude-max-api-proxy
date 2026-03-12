@@ -33,19 +33,27 @@ const MODEL_MAP: Record<string, ClaudeModel> = {
  * Extract Claude model alias from request model string
  */
 export function extractModel(model: string): ClaudeModel {
-  // Try direct lookup
   if (MODEL_MAP[model]) {
     return MODEL_MAP[model];
   }
-
-  // Try stripping provider prefix
   const stripped = model.replace(/^claude-code-cli\//, "");
   if (MODEL_MAP[stripped]) {
     return MODEL_MAP[stripped];
   }
-
-  // Default to opus (Claude Max subscription)
   return "opus";
+}
+
+/**
+ * Escape content that could be confused with our XML-like structural tags.
+ * Replaces literal occurrences of tag names used in prompt construction
+ * so user/tool content cannot forge role boundaries or tool calls.
+ */
+function escapeStructuralTags(text: string): string {
+  return text
+    .replace(/<\/?system>/g, (m) => `&lt;${m.slice(1)}`)
+    .replace(/<\/?previous_response>/g, (m) => `&lt;${m.slice(1)}`)
+    .replace(/<\/?tool_call>/g, (m) => `&lt;${m.slice(1)}`)
+    .replace(/<\/?tool_result[^>]*>/g, (m) => `&lt;${m.slice(1)}`);
 }
 
 /**
@@ -99,47 +107,53 @@ export function messagesToPrompt(
   for (const msg of messages) {
     switch (msg.role) {
       case "system": {
-        const text = normalizeContent(msg.content);
+        const text = escapeStructuralTags(normalizeContent(msg.content));
         parts.push(`<system>\n${text}\n</system>\n`);
         break;
       }
 
       case "user": {
-        const text = normalizeContent(msg.content);
+        const text = escapeStructuralTags(normalizeContent(msg.content));
         parts.push(text);
         break;
       }
 
       case "assistant": {
-        // Handle assistant messages with tool_calls
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           const textContent = normalizeContent(msg.content);
           const toolCallParts: string[] = [];
-          if (textContent) toolCallParts.push(textContent);
+          if (textContent) toolCallParts.push(escapeStructuralTags(textContent));
           for (const tc of msg.tool_calls) {
             const fn = tc.function;
-            const args =
-              typeof fn.arguments === "string"
-                ? fn.arguments
-                : JSON.stringify(fn.arguments);
+            // Reconstruct tool call as JSON — safe because JSON.stringify
+            // handles escaping of the values within the JSON string.
+            const callObj = {
+              id: tc.id || "",
+              name: fn.name,
+              arguments:
+                typeof fn.arguments === "string"
+                  ? JSON.parse(fn.arguments)
+                  : fn.arguments,
+            };
             toolCallParts.push(
-              `<tool_call>\n{"id": "${tc.id || ""}", "name": "${fn.name}", "arguments": ${args}}\n</tool_call>`
+              `<tool_call>\n${JSON.stringify(callObj)}\n</tool_call>`
             );
           }
           parts.push(
             `<previous_response>\n${toolCallParts.join("\n")}\n</previous_response>\n`
           );
         } else {
-          const text = normalizeContent(msg.content);
+          const text = escapeStructuralTags(normalizeContent(msg.content));
           parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
         }
         break;
       }
 
       case "tool": {
-        // Tool result message
-        const toolContent = normalizeContent(msg.content);
-        const toolCallId = msg.tool_call_id || "";
+        const toolContent = escapeStructuralTags(
+          normalizeContent(msg.content)
+        );
+        const toolCallId = (msg.tool_call_id || "").replace(/"/g, "");
         parts.push(
           `<tool_result tool_call_id="${toolCallId}">\n${toolContent}\n</tool_result>\n`
         );
@@ -200,12 +214,16 @@ export function extractLastUserMessage(
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
+  // Respect tool_choice: "none" — do not expose tools at all
+  const toolChoiceNone = request.tool_choice === "none";
   const tools =
-    request.tools && request.tools.length > 0 ? request.tools : null;
+    !toolChoiceNone && request.tools && request.tools.length > 0
+      ? request.tools
+      : null;
   return {
     prompt: messagesToPrompt(request.messages),
     model: extractModel(request.model),
-    sessionId: request.user, // Use OpenAI's user field for session mapping
+    sessionId: request.user,
     hasTools: !!tools,
     toolSystemPrompt: tools ? toolsToSystemPrompt(tools) : null,
   };

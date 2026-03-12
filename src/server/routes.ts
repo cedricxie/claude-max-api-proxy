@@ -23,8 +23,6 @@ import type {
 
 /**
  * Handle POST /v1/chat/completions
- *
- * Main endpoint for chat requests, supports both streaming and non-streaming
  */
 export async function handleChatCompletions(
   req: Request,
@@ -35,7 +33,6 @@ export async function handleChatCompletions(
   const stream = body.stream === true;
 
   try {
-    // Validate request
     if (
       !body.messages ||
       !Array.isArray(body.messages) ||
@@ -51,18 +48,11 @@ export async function handleChatCompletions(
       return;
     }
 
-    // Convert to CLI input format
     const cliInput = openaiToCli(body);
     const subprocess = new ClaudeSubprocess();
 
     if (stream) {
-      await handleStreamingResponse(
-        req,
-        res,
-        subprocess,
-        cliInput,
-        requestId
-      );
+      await handleStreamingResponse(res, subprocess, cliInput, requestId);
     } else {
       await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
     }
@@ -88,24 +78,21 @@ export async function handleChatCompletions(
  * When tools are present, text is buffered until completion so we can
  * detect <tool_call> blocks and emit them as proper OpenAI tool_calls
  * chunks instead of raw text.
+ *
+ * Uses result.result as authoritative source for tool-call parsing when
+ * available, falling back to buffered content_delta text.
  */
 async function handleStreamingResponse(
-  req: Request,
   res: Response,
   subprocess: ClaudeSubprocess,
   cliInput: CliInput,
   requestId: string
 ): Promise<void> {
-  // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Request-Id", requestId);
-
-  // CRITICAL: Flush headers immediately to establish SSE connection
   res.flushHeaders();
-
-  // Send initial comment to confirm connection is alive
   res.write(":ok\n\n");
 
   const hasTools = cliInput.hasTools;
@@ -114,10 +101,8 @@ async function handleStreamingResponse(
     let isFirst = true;
     let lastModel = "claude-sonnet-4";
     let isComplete = false;
-    // Buffer streamed text when tools are present
     let fullStreamedText = "";
 
-    // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
       if (!isComplete) {
         subprocess.kill();
@@ -125,12 +110,10 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    // Handle streaming content deltas
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
       const text = event.event.delta?.text || "";
       if (text && !res.writableEnded) {
         if (hasTools) {
-          // Buffer text — we'll emit it at the end after parsing tool calls
           fullStreamedText += text;
         } else {
           const chunk = {
@@ -155,44 +138,25 @@ async function handleStreamingResponse(
       }
     });
 
-    // Handle final assistant message (for model name)
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
       lastModel = message.message.model;
     });
 
-    subprocess.on("result", (_result: ClaudeCliResult) => {
+    subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
       if (!res.writableEnded) {
-        // When tools are present, parse buffered text for tool_call blocks
         let finishReason: "stop" | "tool_calls" = "stop";
-        if (hasTools && fullStreamedText) {
-          const { text: cleanText, toolCalls } =
-            parseToolCalls(fullStreamedText);
 
-          // Emit any text content (with tool_call blocks removed)
-          if (cleanText) {
-            const textChunk = {
-              id: `chatcmpl-${requestId}`,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: lastModel,
-              choices: [
-                {
-                  index: 0,
-                  delta: { role: "assistant" as const, content: cleanText },
-                  finish_reason: null,
-                },
-              ],
-            };
-            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-          }
+        if (hasTools) {
+          // Use result.result as authoritative source; fall back to
+          // buffered deltas only if result.result is absent.
+          const sourceText = result.result || fullStreamedText;
 
-          // Emit tool calls
-          if (toolCalls.length > 0) {
-            finishReason = "tool_calls";
-            for (let i = 0; i < toolCalls.length; i++) {
-              const tc = toolCalls[i];
-              const toolChunk = {
+          if (sourceText) {
+            const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
+
+            if (cleanText) {
+              const textChunk = {
                 id: `chatcmpl-${requestId}`,
                 object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
@@ -201,30 +165,52 @@ async function handleStreamingResponse(
                   {
                     index: 0,
                     delta: {
-                      tool_calls: [
-                        {
-                          index: i,
-                          id: tc.id,
-                          type: "function" as const,
-                          function: {
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                          },
-                        },
-                      ],
+                      role: "assistant" as const,
+                      content: cleanText,
                     },
                     finish_reason: null,
                   },
                 ],
               };
-              res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
+              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+
+            if (toolCalls.length > 0) {
+              finishReason = "tool_calls";
+              for (let i = 0; i < toolCalls.length; i++) {
+                const tc = toolCalls[i];
+                const toolChunk = {
+                  id: `chatcmpl-${requestId}`,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: lastModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: i,
+                            id: tc.id,
+                            type: "function" as const,
+                            function: {
+                              name: tc.function.name,
+                              arguments: tc.function.arguments,
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
+              }
             }
           }
         }
 
-        // Send final done chunk
         const doneChunk = createDoneChunk(requestId, lastModel);
-        // Override finish_reason if tool calls were detected
         if (finishReason === "tool_calls") {
           doneChunk.choices[0].finish_reason = "tool_calls";
         }
@@ -271,7 +257,6 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
     subprocess
       .start(cliInput.prompt, {
         model: cliInput.model,
@@ -329,7 +314,6 @@ async function handleNonStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
     subprocess
       .start(cliInput.prompt, {
         model: cliInput.model,

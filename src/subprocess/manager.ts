@@ -7,8 +7,6 @@
 
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import fs from "fs/promises";
-import path from "path";
 import type {
   ClaudeCliMessage,
   ClaudeCliAssistant,
