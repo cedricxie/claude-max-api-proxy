@@ -127,14 +127,18 @@ export function messagesToPrompt(
             const fn = tc.function;
             // Reconstruct tool call as JSON — safe because JSON.stringify
             // handles escaping of the values within the JSON string.
-            const callObj = {
-              id: tc.id || "",
-              name: fn.name,
-              arguments:
-                typeof fn.arguments === "string"
-                  ? JSON.parse(fn.arguments)
-                  : fn.arguments,
-            };
+            let argsObj: unknown;
+            if (typeof fn.arguments === "string") {
+              try {
+                argsObj = JSON.parse(fn.arguments);
+              } catch {
+                // Malformed arguments string — pass through as-is
+                argsObj = fn.arguments;
+              }
+            } else {
+              argsObj = fn.arguments;
+            }
+            const callObj = { id: tc.id || "", name: fn.name, arguments: argsObj };
             toolCallParts.push(
               `<tool_call>\n${JSON.stringify(callObj)}\n</tool_call>`
             );
@@ -214,12 +218,30 @@ export function extractLastUserMessage(
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
-  // Respect tool_choice: "none" — do not expose tools at all
-  const toolChoiceNone = request.tool_choice === "none";
-  const tools =
-    !toolChoiceNone && request.tools && request.tools.length > 0
-      ? request.tools
-      : null;
+  // Respect tool_choice
+  const toolChoice = request.tool_choice;
+  let tools: OpenAITool[] | null = null;
+
+  if (toolChoice === "none") {
+    // Caller explicitly disabled tools
+    tools = null;
+  } else if (request.tools && request.tools.length > 0) {
+    if (
+      toolChoice &&
+      typeof toolChoice === "object" &&
+      toolChoice.type === "function" &&
+      toolChoice.function?.name
+    ) {
+      // Force a specific tool — filter to just that tool
+      const forced = request.tools.filter(
+        (t) => t.function.name === toolChoice.function.name
+      );
+      tools = forced.length > 0 ? forced : request.tools;
+    } else {
+      tools = request.tools;
+    }
+  }
+
   return {
     prompt: messagesToPrompt(request.messages),
     model: extractModel(request.model),

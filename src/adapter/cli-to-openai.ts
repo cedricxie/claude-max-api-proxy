@@ -24,58 +24,123 @@ export function extractTextContent(message: ClaudeCliAssistant): string {
  * Returns { text, toolCalls } where text has only successfully parsed
  * tool_call blocks removed. Malformed blocks are preserved in text.
  */
+/**
+ * Try to extract a JSON object starting at the given position in text.
+ * Handles nested braces so that `</tool_call>` inside a JSON string
+ * value does not prematurely terminate the match.
+ * Returns the parsed object and end index, or null on failure.
+ */
+function extractJsonObject(
+  text: string,
+  start: number
+): { value: Record<string, unknown>; end: number } | null {
+  let i = start;
+  // Skip whitespace
+  while (i < text.length && /\s/.test(text[i])) i++;
+  if (text[i] !== "{") return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const jsonStr = text.slice(start, i + 1).trim();
+        try {
+          const value = JSON.parse(jsonStr);
+          return { value, end: i + 1 };
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export function parseToolCalls(text: string): {
   text: string;
   toolCalls: OpenAIToolCall[];
 } {
   const toolCalls: OpenAIToolCall[] = [];
-  const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-  // Track offsets of successfully parsed blocks for removal
   const parsedRanges: Array<{ start: number; end: number }> = [];
-  let match: RegExpExecArray | null;
+  const OPEN_TAG = "<tool_call>";
+  const CLOSE_TAG = "</tool_call>";
   let callIndex = 0;
+  let searchFrom = 0;
 
-  while ((match = TOOL_CALL_RE.exec(text)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1]);
+  while (true) {
+    const tagStart = text.indexOf(OPEN_TAG, searchFrom);
+    if (tagStart === -1) break;
 
-      // Validate required fields
-      if (typeof parsed.name !== "string" || !parsed.name) {
-        console.error(
-          "[parseToolCalls] Missing or invalid 'name':",
-          match[1].slice(0, 200)
-        );
-        continue;
+    const jsonStart = tagStart + OPEN_TAG.length;
+    const extracted = extractJsonObject(text, jsonStart);
+
+    if (extracted) {
+      const parsed = extracted.value;
+      // Find closing tag after the JSON object
+      let closeStart = extracted.end;
+      // Skip whitespace
+      while (closeStart < text.length && /\s/.test(text[closeStart]))
+        closeStart++;
+      if (text.startsWith(CLOSE_TAG, closeStart)) {
+        const blockEnd = closeStart + CLOSE_TAG.length;
+
+        // Validate required fields
+        if (typeof parsed.name === "string" && parsed.name) {
+          toolCalls.push({
+            id:
+              typeof parsed.id === "string" && parsed.id
+                ? parsed.id
+                : `call_${Date.now()}_${callIndex}`,
+            type: "function",
+            function: {
+              name: parsed.name as string,
+              arguments:
+                typeof parsed.arguments === "string"
+                  ? parsed.arguments
+                  : JSON.stringify(parsed.arguments || {}),
+            },
+          });
+          parsedRanges.push({ start: tagStart, end: blockEnd });
+          callIndex++;
+        } else {
+          console.error(
+            "[parseToolCalls] Missing or invalid 'name':",
+            JSON.stringify(parsed).slice(0, 200)
+          );
+        }
+        searchFrom = blockEnd;
+      } else {
+        // No closing tag found after JSON — skip this occurrence
+        searchFrom = tagStart + OPEN_TAG.length;
       }
-
-      toolCalls.push({
-        id: typeof parsed.id === "string" && parsed.id
-          ? parsed.id
-          : `call_${Date.now()}_${callIndex}`,
-        type: "function",
-        function: {
-          name: parsed.name,
-          arguments:
-            typeof parsed.arguments === "string"
-              ? parsed.arguments
-              : JSON.stringify(parsed.arguments || {}),
-        },
-      });
-      parsedRanges.push({ start: match.index, end: match.index + match[0].length });
-      callIndex++;
-    } catch {
-      // Failed to parse — leave this block in text (don't add to parsedRanges)
-      console.error(
-        "[parseToolCalls] Failed to parse:",
-        match[1].slice(0, 200)
-      );
+    } else {
+      // Could not extract JSON — try regex fallback for simple cases
+      searchFrom = tagStart + OPEN_TAG.length;
     }
   }
 
   // Remove only successfully parsed blocks from text
   let cleanText = text;
   if (parsedRanges.length > 0) {
-    // Remove in reverse order to preserve offsets
     for (let i = parsedRanges.length - 1; i >= 0; i--) {
       const { start, end } = parsedRanges[i];
       cleanText = cleanText.slice(0, start) + cleanText.slice(end);
