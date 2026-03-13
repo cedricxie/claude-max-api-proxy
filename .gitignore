@@ -1,8 +1,8 @@
 # Dependencies
 node_modules/
 
-# Build output
-dist/
+# Build output (committed for npm install from git)
+# dist/
 
 # Logs
 *.log
