@@ -50,6 +50,7 @@ function normalizeContentForKey(content: unknown): string {
 
 interface SessionInput {
   prompt: string;
+  systemPrompt?: string | null;
   model: string;
   sessionId?: string;
   useResume: boolean;
@@ -193,6 +194,7 @@ export async function handleChatCompletions(
 
     const cliInput = openaiToCli(body);
     const sessionInput = resolveSessionInput(body, cliInput);
+    sessionInput.systemPrompt = cliInput.systemPrompt || null;
     sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
     sessionInput.hasTools = cliInput.hasTools || false;
 
@@ -538,6 +540,7 @@ async function handleStreamingResponse(
         model: sessionInput.model as import("../adapter/openai-to-cli.js").ClaudeModel,
         sessionId: sessionInput.sessionId,
         useResume: sessionInput.useResume,
+        systemPrompt: sessionInput.systemPrompt,
         toolSystemPrompt: sessionInput.toolSystemPrompt,
         hasTools: sessionInput.hasTools,
       })
@@ -651,6 +654,7 @@ async function handleNonStreamingResponse(
         model: sessionInput.model as import("../adapter/openai-to-cli.js").ClaudeModel,
         sessionId: sessionInput.sessionId,
         useResume: sessionInput.useResume,
+        systemPrompt: sessionInput.systemPrompt,
         toolSystemPrompt: sessionInput.toolSystemPrompt,
         hasTools: sessionInput.hasTools,
       })

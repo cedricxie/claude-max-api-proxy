@@ -107,10 +107,26 @@ export class ClaudeSubprocess extends EventEmitter {
                 args.push("--session-id", options.sessionId);
             }
         }
-        // When custom tools are provided, inject tool definitions via system prompt
-        // and disable built-in tools so Claude focuses on the custom ones.
-        // --tools is variadic, so use "--" to prevent it from consuming the prompt.
-        if (options.toolSystemPrompt) {
+        // Pass system prompt via --system-prompt flag so Claude CLI treats it as
+        // authoritative system instructions, not user text that could be ignored.
+        //
+        // Skip on resume: the CLI session already has the system prompt baked in
+        // from the first turn. Re-sending could override saved session state.
+        //
+        // When both systemPrompt and toolSystemPrompt are present, consolidate
+        // into a single --system-prompt to avoid undefined interaction between
+        // --system-prompt (replaces built-in) and --append-system-prompt (appends to built-in).
+        const isResume = options.useResume && options.sessionId;
+        const sysPrompt = isResume ? null : options.systemPrompt;
+        if (sysPrompt && options.toolSystemPrompt) {
+            args.push("--system-prompt", sysPrompt + "\n\n" + options.toolSystemPrompt);
+            args.push("--tools", "", "--");
+        }
+        else if (sysPrompt) {
+            args.push("--system-prompt", sysPrompt);
+        }
+        else if (options.toolSystemPrompt) {
+            // No caller system prompt — append tool defs to CLI's built-in system prompt.
             args.push("--append-system-prompt", options.toolSystemPrompt);
             args.push("--tools", "", "--");
         }
