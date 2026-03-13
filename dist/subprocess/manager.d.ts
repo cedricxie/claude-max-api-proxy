@@ -64,11 +64,7 @@ export declare function verifyClaude(): Promise<{
     version?: string;
 }>;
 /**
- * Check if Claude CLI is authenticated
- *
- * Claude Code stores credentials in the OS keychain, not a file.
- * We verify authentication by checking if we can call the CLI successfully.
- * If the CLI is installed, it typically has valid credentials from `claude auth login`.
+ * Check if Claude CLI is authenticated by running `claude auth status`.
  */
 export declare function verifyAuth(): Promise<{
     ok: boolean;

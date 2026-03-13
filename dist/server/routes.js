@@ -144,12 +144,23 @@ export async function handleChatCompletions(req, res) {
         sessionInput.systemPrompt = cliInput.systemPrompt || null;
         sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
         sessionInput.hasTools = cliInput.hasTools || false;
-        const subprocess = new ClaudeSubprocess();
-        if (stream) {
-            await handleStreamingResponse(res, subprocess, sessionInput, requestId);
+        // Serialize concurrent requests for the same session to avoid
+        // race conditions in the CLI subprocess
+        const lockKey = sessionInput.conversationKey;
+        const releaseLock = lockKey
+            ? await sessionManager.acquireLock(lockKey)
+            : null;
+        try {
+            const subprocess = new ClaudeSubprocess();
+            if (stream) {
+                await handleStreamingResponse(res, subprocess, sessionInput, requestId);
+            }
+            else {
+                await handleNonStreamingResponse(res, subprocess, sessionInput, requestId);
+            }
         }
-        else {
-            await handleNonStreamingResponse(res, subprocess, sessionInput, requestId);
+        finally {
+            releaseLock?.();
         }
     }
     catch (error) {

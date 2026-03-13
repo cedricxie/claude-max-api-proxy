@@ -10,10 +10,13 @@ import path from "path";
 const SESSION_FILE = path.join(process.env.HOME || "/tmp", ".claude-code-cli-sessions.json");
 // Session TTL: 24 hours
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+// Maximum number of sessions before forced eviction of oldest
+const MAX_SESSIONS = 1000;
 class SessionManager {
     sessions = new Map();
     loaded = false;
     saveQueue = Promise.resolve();
+    locks = new Map();
     /**
      * Load sessions from disk
      */
@@ -68,6 +71,7 @@ class SessionManager {
             cumulativeInputTokens: 0,
         };
         this.sessions.set(clawdbotId, mapping);
+        this.evictIfNeeded();
         console.log(`[SessionManager] Created session: ${clawdbotId} -> ${claudeSessionId}`);
         // Fire and forget save
         this.save().catch((err) => console.error("[SessionManager] Save error:", err));
@@ -128,6 +132,39 @@ class SessionManager {
      */
     get size() {
         return this.sessions.size;
+    }
+    /**
+     * Acquire a per-session lock so concurrent requests for the same
+     * session are serialized. Returns a release function.
+     */
+    async acquireLock(key) {
+        // Wait for any existing lock on this key
+        while (this.locks.has(key)) {
+            await this.locks.get(key);
+        }
+        let release;
+        const promise = new Promise((resolve) => {
+            release = resolve;
+        });
+        this.locks.set(key, promise);
+        return () => {
+            this.locks.delete(key);
+            release();
+        };
+    }
+    /**
+     * Evict oldest sessions if we exceed MAX_SESSIONS
+     */
+    evictIfNeeded() {
+        if (this.sessions.size <= MAX_SESSIONS)
+            return;
+        const entries = Array.from(this.sessions.entries())
+            .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+        const toRemove = this.sessions.size - MAX_SESSIONS;
+        for (let i = 0; i < toRemove; i++) {
+            this.sessions.delete(entries[i][0]);
+        }
+        console.log(`[SessionManager] Evicted ${toRemove} oldest sessions (cap: ${MAX_SESSIONS})`);
     }
 }
 // Singleton instance

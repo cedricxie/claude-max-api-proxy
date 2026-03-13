@@ -38,6 +38,14 @@ export interface SubprocessEvents {
 
 const DEFAULT_TIMEOUT = 600000; // 10 minutes
 
+/**
+ * Sanitize session ID to prevent CLI argument injection.
+ * Only allows alphanumeric characters, hyphens, and underscores.
+ */
+function sanitizeSessionId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9\-_]/g, "");
+}
+
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
   private buffer: string = "";
@@ -48,10 +56,18 @@ export class ClaudeSubprocess extends EventEmitter {
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
-    const args = this.buildArgs(prompt, options);
+    const args = this.buildArgs(options);
     const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (!settled) {
+          settled = true;
+          fn();
+        }
+      };
+
       try {
         // Use spawn() for security - no shell interpretation
         // Unset CLAUDECODE so nested Claude sessions are allowed
@@ -68,6 +84,11 @@ export class ClaudeSubprocess extends EventEmitter {
           if (!this.isKilled) {
             this.isKilled = true;
             this.process?.kill("SIGTERM");
+            // Follow up with SIGKILL if process doesn't exit within 5 seconds
+            const killTimer = setTimeout(() => {
+              try { this.process?.kill("SIGKILL"); } catch { /* already dead */ }
+            }, 5000);
+            killTimer.unref();
             this.emit("error", new Error(`Request timed out after ${timeout}ms`));
           }
         }, timeout);
@@ -76,17 +97,20 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.on("error", (err) => {
           this.clearTimeout();
           if (err.message.includes("ENOENT")) {
-            reject(
-              new Error(
-                "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+            settle(() =>
+              reject(
+                new Error(
+                  "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+                )
               )
             );
           } else {
-            reject(err);
+            settle(() => reject(err));
           }
         });
 
-        // Close stdin since we pass prompt as argument
+        // Pass prompt via stdin to avoid ARG_MAX limits on large conversations
+        this.process.stdin?.write(prompt);
         this.process.stdin?.end();
 
         console.error(`[Subprocess] Process spawned with PID: ${this.process.pid}`);
@@ -121,10 +145,10 @@ export class ClaudeSubprocess extends EventEmitter {
         });
 
         // Resolve immediately since we're streaming
-        resolve();
+        settle(() => resolve());
       } catch (err) {
         this.clearTimeout();
-        reject(err);
+        settle(() => reject(err as Error));
       }
     });
   }
@@ -132,7 +156,7 @@ export class ClaudeSubprocess extends EventEmitter {
   /**
    * Build CLI arguments array
    */
-  private buildArgs(prompt: string, options: SubprocessOptions): string[] {
+  private buildArgs(options: SubprocessOptions): string[] {
     const args = [
       "--print", // Non-interactive mode
       "--output-format",
@@ -143,11 +167,11 @@ export class ClaudeSubprocess extends EventEmitter {
 
     if (options.useResume && options.sessionId) {
       // Resume existing session — Claude loads history from disk
-      args.push("--resume", options.sessionId);
+      args.push("--resume", sanitizeSessionId(options.sessionId));
     } else {
       args.push("--model", options.model);
       if (options.sessionId) {
-        args.push("--session-id", options.sessionId);
+        args.push("--session-id", sanitizeSessionId(options.sessionId));
       }
     }
 
@@ -174,7 +198,7 @@ export class ClaudeSubprocess extends EventEmitter {
       args.push("--tools", "", "--");
     }
 
-    args.push(prompt); // Pass prompt as argument (more reliable than stdin)
+    // Prompt is passed via stdin (not argv) to avoid OS ARG_MAX limits
     return args;
   }
 
@@ -271,16 +295,33 @@ export async function verifyClaude(): Promise<{ ok: boolean; error?: string; ver
 }
 
 /**
- * Check if Claude CLI is authenticated
- *
- * Claude Code stores credentials in the OS keychain, not a file.
- * We verify authentication by checking if we can call the CLI successfully.
- * If the CLI is installed, it typically has valid credentials from `claude auth login`.
+ * Check if Claude CLI is authenticated by running `claude auth status`.
  */
 export async function verifyAuth(): Promise<{ ok: boolean; error?: string }> {
-  // If Claude CLI is installed and the user has run `claude auth login`,
-  // credentials are stored in the OS keychain and will be used automatically.
-  // We can't easily check the keychain, so we'll just return true if the CLI exists.
-  // Authentication errors will surface when making actual API calls.
-  return { ok: true };
+  return new Promise((resolve) => {
+    const proc = spawn("claude", ["auth", "status"], { stdio: "pipe" });
+    let output = "";
+
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+
+    proc.on("error", () => {
+      resolve({ ok: false, error: "Claude CLI not found" });
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve({ ok: true });
+      } else {
+        resolve({
+          ok: false,
+          error: `Claude CLI auth check failed: ${output.trim().slice(0, 200)}`,
+        });
+      }
+    });
+  });
 }
