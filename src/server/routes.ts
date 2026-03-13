@@ -1,13 +1,15 @@
 /**
  * API Route Handlers
  *
- * Implements OpenAI-compatible endpoints with tool-calling support.
+ * Implements OpenAI-compatible endpoints with tool-calling support
+ * and session management for multi-turn conversations.
  */
 
 import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
+import { createHash } from "crypto";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli } from "../adapter/openai-to-cli.js";
+import { openaiToCli, extractLastUserMessage } from "../adapter/openai-to-cli.js";
 import type { CliInput } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -20,6 +22,116 @@ import type {
   ClaudeCliResult,
   ClaudeCliStreamEvent,
 } from "../types/claude-cli.js";
+import { sessionManager } from "../session/manager.js";
+
+interface SessionInput {
+  prompt: string;
+  model: string;
+  sessionId?: string;
+  useResume: boolean;
+  conversationKey: string | null;
+  toolSystemPrompt?: string | null;
+  hasTools?: boolean;
+}
+
+/**
+ * Derive a stable conversation key from the messages array when body.user is not set.
+ *
+ * Uses the first user message content (+ a prefix of the system prompt for disambiguation)
+ * as a fingerprint. This is stable across all turns of the same conversation because
+ * the first user message never changes once the conversation starts.
+ */
+function deriveConversationKey(
+  messages: OpenAIChatRequest["messages"]
+): string | null {
+  if (!messages || messages.length < 2) return null;
+
+  const firstUser = messages.find((m) => m.role === "user");
+  if (!firstUser) return null;
+
+  const userContent =
+    typeof firstUser.content === "string"
+      ? firstUser.content
+      : JSON.stringify(firstUser.content);
+
+  const sys = messages.find((m) => m.role === "system");
+  const sysPrefix = sys
+    ? (typeof sys.content === "string"
+        ? sys.content
+        : JSON.stringify(sys.content)
+      ).slice(0, 200)
+    : "";
+
+  return createHash("sha256")
+    .update(sysPrefix + "|" + userContent)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+/**
+ * Resolve session info for a request.
+ *
+ * - If body.user is set, use it as a stable conversation key.
+ * - Otherwise, derive a key from the first user message so sessions can be
+ *   resumed across turns even when the caller doesn't set body.user.
+ *   - First turn: create a new pinned session ID, send full prompt.
+ *   - Subsequent turns: resume that session, send only the latest user message.
+ */
+function resolveSessionInput(
+  body: OpenAIChatRequest,
+  cliInput: CliInput
+): SessionInput {
+  const conversationKey =
+    body.user || deriveConversationKey(body.messages);
+
+  if (!conversationKey) {
+    return {
+      prompt: cliInput.prompt,
+      model: cliInput.model,
+      sessionId: undefined,
+      useResume: false,
+      conversationKey: null,
+    };
+  }
+
+  const existing = sessionManager.get(conversationKey);
+
+  if (existing) {
+    // Resume: only send the latest user message — Claude has the rest in its session file
+    // Call getOrCreate (not just get) so lastUsedAt is updated and session won't expire
+    const sessionId = sessionManager.getOrCreate(
+      conversationKey,
+      existing.model
+    );
+    const lastMessage = extractLastUserMessage(body.messages);
+    console.log(
+      `[Session] Resuming session ${sessionId} for key "${conversationKey}" (${existing.cumulativeInputTokens || 0} tokens)`
+    );
+    return {
+      prompt: lastMessage,
+      model: existing.model,
+      sessionId,
+      useResume: true,
+      conversationKey,
+    };
+  } else {
+    // First turn: pin a UUID session ID so we can resume it later
+    const sessionId = sessionManager.getOrCreate(
+      conversationKey,
+      cliInput.model
+    );
+    console.log(
+      `[Session] New session ${sessionId} for key "${conversationKey}"`
+    );
+    return {
+      prompt: cliInput.prompt,
+      model: cliInput.model,
+      sessionId,
+      useResume: false,
+      conversationKey,
+    };
+  }
+}
 
 /**
  * Handle POST /v1/chat/completions
@@ -49,12 +161,26 @@ export async function handleChatCompletions(
     }
 
     const cliInput = openaiToCli(body);
+    const sessionInput = resolveSessionInput(body, cliInput);
+    sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
+    sessionInput.hasTools = cliInput.hasTools || false;
+
     const subprocess = new ClaudeSubprocess();
 
     if (stream) {
-      await handleStreamingResponse(res, subprocess, cliInput, requestId);
+      await handleStreamingResponse(
+        res,
+        subprocess,
+        sessionInput,
+        requestId
+      );
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
+      await handleNonStreamingResponse(
+        res,
+        subprocess,
+        sessionInput,
+        requestId
+      );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -85,7 +211,7 @@ export async function handleChatCompletions(
 async function handleStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: CliInput,
+  sessionInput: SessionInput,
   requestId: string
 ): Promise<void> {
   res.setHeader("Content-Type", "text/event-stream");
@@ -95,7 +221,8 @@ async function handleStreamingResponse(
   res.flushHeaders();
   res.write(":ok\n\n");
 
-  const hasTools = cliInput.hasTools;
+  const hasTools = sessionInput.hasTools || false;
+  const conversationKey = sessionInput.conversationKey;
 
   return new Promise<void>((resolve, reject) => {
     let isFirst = true;
@@ -103,13 +230,20 @@ async function handleStreamingResponse(
     let isComplete = false;
     // When tools are present, we stream text incrementally but hold back
     // content once we see the start of a potential <tool_call> tag.
-    // This avoids fully buffering the response while still catching tool calls.
     let pendingBuffer = "";
     // Track how many chars of text were already streamed to clients
     let streamedCharCount = 0;
+    // Track the last assistant message's usage — this reflects the ACTUAL
+    // current context size, unlike result.usage which is cumulative across
+    // all API calls (tool-use turns) within a single CLI invocation.
+    let lastAssistantUsage: ClaudeCliAssistant["message"]["usage"] | null =
+      null;
 
     /** Emit a text content chunk, handling the initial role emission */
-    function emitTextChunk(content: string, trackStreamed: boolean = true): void {
+    function emitTextChunk(
+      content: string,
+      trackStreamed: boolean = true
+    ): void {
       if (!content || res.writableEnded) return;
       if (trackStreamed) streamedCharCount += content.length;
       const chunk = {
@@ -166,10 +300,53 @@ async function handleStreamingResponse(
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
       lastModel = message.message.model;
+      if (message.message.usage) {
+        lastAssistantUsage = message.message.usage;
+      }
     });
 
     subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
+
+      // Use lastAssistantUsage (last API call) for context-related metrics.
+      // result.usage is cumulative across all tool-use turns and would
+      // inflate context size by N× where N = number of turns.
+      const contextUsage = lastAssistantUsage || result?.usage;
+
+      // Track context growth for cap (exclude cache_read — it's re-reading
+      // existing context, not new growth)
+      const contextGrowth =
+        (contextUsage?.input_tokens || 0) +
+        (contextUsage?.cache_creation_input_tokens || 0);
+      if (conversationKey && contextGrowth > 0) {
+        sessionManager.addTokens(conversationKey, contextGrowth);
+      }
+
+      // Detect CLI auto-compaction by total context token drop.
+      // Total context = input_tokens + cache_read + cache_creation.
+      // After compaction, cache_read drops to ~0 and total shrinks dramatically.
+      // If total dropped >50% vs last turn, CLI compacted — reset session.
+      if (conversationKey && sessionInput.useResume) {
+        const session = sessionManager.get(conversationKey);
+        const totalContext =
+          (contextUsage?.input_tokens || 0) +
+          (contextUsage?.cache_read_input_tokens || 0) +
+          (contextUsage?.cache_creation_input_tokens || 0);
+        if (
+          session?.lastTotalContext &&
+          totalContext > 0 &&
+          totalContext < session.lastTotalContext * 0.5
+        ) {
+          console.log(
+            `[Session] Compaction detected for "${conversationKey}" — context dropped ${session.lastTotalContext} → ${totalContext}. Resetting session.`
+          );
+          sessionManager.delete(conversationKey);
+        } else if (session && totalContext > 0) {
+          session.lastTotalContext = totalContext;
+          sessionManager.save().catch(() => {});
+        }
+      }
+
       if (!res.writableEnded) {
         let finishReason: "stop" | "tool_calls" = "stop";
 
@@ -182,7 +359,6 @@ async function handleStreamingResponse(
             const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
 
             // Only emit text that hasn't been streamed yet.
-            // streamedCharCount tracks prefix text already sent incrementally.
             if (cleanText && cleanText.length > streamedCharCount) {
               const remaining = cleanText.slice(streamedCharCount);
               if (remaining) emitTextChunk(remaining, false);
@@ -244,10 +420,42 @@ async function handleStreamingResponse(
           }
         }
 
-        const doneChunk = createDoneChunk(requestId, lastModel);
-        if (finishReason === "tool_calls") {
-          doneChunk.choices[0].finish_reason = "tool_calls";
+        // Emit usage chunk if the CLI provided token counts.
+        // Use contextUsage for prompt_tokens (actual context size),
+        // but result.usage for output_tokens (cumulative is correct for billing).
+        const cu = contextUsage;
+        const cumulativeOutput = result?.usage?.output_tokens || 0;
+        if (cu && ((cu.input_tokens || 0) > 0 || cumulativeOutput > 0)) {
+          const usageChunk = {
+            id: `chatcmpl-${requestId}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: lastModel,
+            choices: [
+              { index: 0, delta: {}, finish_reason: finishReason },
+            ],
+            usage: {
+              prompt_tokens:
+                (cu.input_tokens || 0) +
+                (cu.cache_read_input_tokens || 0) +
+                (cu.cache_creation_input_tokens || 0),
+              completion_tokens: cumulativeOutput,
+              total_tokens:
+                (cu.input_tokens || 0) +
+                cumulativeOutput +
+                (cu.cache_read_input_tokens || 0) +
+                (cu.cache_creation_input_tokens || 0),
+              input_tokens: cu.input_tokens || 0,
+              output_tokens: cumulativeOutput,
+              cache_read_input_tokens: cu.cache_read_input_tokens || 0,
+              cache_creation_input_tokens:
+                cu.cache_creation_input_tokens || 0,
+            },
+          };
+          res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
         }
+
+        const doneChunk = createDoneChunk(requestId, lastModel);
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
@@ -292,11 +500,12 @@ async function handleStreamingResponse(
     });
 
     subprocess
-      .start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-        toolSystemPrompt: cliInput.toolSystemPrompt,
-        hasTools: cliInput.hasTools,
+      .start(sessionInput.prompt, {
+        model: sessionInput.model as import("../adapter/openai-to-cli.js").ClaudeModel,
+        sessionId: sessionInput.sessionId,
+        useResume: sessionInput.useResume,
+        toolSystemPrompt: sessionInput.toolSystemPrompt,
+        hasTools: sessionInput.hasTools,
       })
       .catch((err) => {
         console.error("[Streaming] Subprocess start error:", err);
@@ -311,14 +520,34 @@ async function handleStreamingResponse(
 async function handleNonStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: CliInput,
+  sessionInput: SessionInput,
   requestId: string
 ): Promise<void> {
+  const hasTools = sessionInput.hasTools || false;
+  const conversationKey = sessionInput.conversationKey;
+
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
+    let lastAssistantUsage: ClaudeCliAssistant["message"]["usage"] | null =
+      null;
+
+    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      if (message.message.usage) {
+        lastAssistantUsage = message.message.usage;
+      }
+    });
 
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
+
+      // Track context growth
+      const contextUsage = lastAssistantUsage || result?.usage;
+      const contextGrowth =
+        (contextUsage?.input_tokens || 0) +
+        (contextUsage?.cache_creation_input_tokens || 0);
+      if (conversationKey && contextGrowth > 0) {
+        sessionManager.addTokens(conversationKey, contextGrowth);
+      }
     });
 
     subprocess.on("error", (error: Error) => {
@@ -334,26 +563,40 @@ async function handleNonStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
-      if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId, cliInput.hasTools));
-      } else if (!res.headersSent) {
-        res.status(500).json({
-          error: {
-            message: `Claude CLI exited with code ${code} without response`,
-            type: "server_error",
-            code: null,
-          },
-        });
+      try {
+        if (finalResult) {
+          res.json(cliResultToOpenai(finalResult, requestId, hasTools));
+        } else if (!res.headersSent) {
+          res.status(500).json({
+            error: {
+              message: `Claude CLI exited with code ${code} without response`,
+              type: "server_error",
+              code: null,
+            },
+          });
+        }
+      } catch (err) {
+        console.error("[NonStreaming] Error sending response:", err);
+        if (!res.headersSent) {
+          res.status(500).json({
+            error: {
+              message: String(err),
+              type: "server_error",
+              code: null,
+            },
+          });
+        }
       }
       resolve();
     });
 
     subprocess
-      .start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-        toolSystemPrompt: cliInput.toolSystemPrompt,
-        hasTools: cliInput.hasTools,
+      .start(sessionInput.prompt, {
+        model: sessionInput.model as import("../adapter/openai-to-cli.js").ClaudeModel,
+        sessionId: sessionInput.sessionId,
+        useResume: sessionInput.useResume,
+        toolSystemPrompt: sessionInput.toolSystemPrompt,
+        hasTools: sessionInput.hasTools,
       })
       .catch((error) => {
         res.status(500).json({

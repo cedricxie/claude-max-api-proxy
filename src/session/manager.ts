@@ -15,6 +15,8 @@ export interface SessionMapping {
   createdAt: number;
   lastUsedAt: number;
   model: string;
+  cumulativeInputTokens: number;
+  lastTotalContext?: number;
 }
 
 const SESSION_FILE = path.join(
@@ -77,6 +79,7 @@ class SessionManager {
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       model,
+      cumulativeInputTokens: 0,
     };
 
     this.sessions.set(clawdbotId, mapping);
@@ -90,6 +93,19 @@ class SessionManager {
     );
 
     return claudeSessionId;
+  }
+
+  /**
+   * Add input tokens to a session's cumulative count
+   */
+  addTokens(clawdbotId: string, inputTokens: number): void {
+    const s = this.sessions.get(clawdbotId);
+    if (s && inputTokens > 0) {
+      s.cumulativeInputTokens = (s.cumulativeInputTokens || 0) + inputTokens;
+      this.save().catch((err) =>
+        console.error("[SessionManager] Save error:", err)
+      );
+    }
   }
 
   /**
