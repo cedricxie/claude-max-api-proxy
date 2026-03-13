@@ -75,10 +75,16 @@ function extractJsonObject(
   return null;
 }
 
-export function parseToolCalls(text: string): {
+export function parseToolCalls(
+  text: string,
+  allowedToolNames?: string[]
+): {
   text: string;
   toolCalls: OpenAIToolCall[];
 } {
+  const allowSet = allowedToolNames?.length
+    ? new Set(allowedToolNames)
+    : null;
   const toolCalls: OpenAIToolCall[] = [];
   const parsedRanges: Array<{ start: number; end: number }> = [];
   const OPEN_TAG = "<tool_call>";
@@ -103,8 +109,8 @@ export function parseToolCalls(text: string): {
       if (text.startsWith(CLOSE_TAG, closeStart)) {
         const blockEnd = closeStart + CLOSE_TAG.length;
 
-        // Validate required fields
-        if (typeof parsed.name === "string" && parsed.name) {
+        // Validate required fields and allowlist
+        if (typeof parsed.name === "string" && parsed.name && (!allowSet || allowSet.has(parsed.name))) {
           // Serialize arguments to a JSON string.
           // OpenAI requires function.arguments to always be a string.
           // Default to "{}" for missing/null args per OpenAI spec (required field).
@@ -132,8 +138,11 @@ export function parseToolCalls(text: string): {
           parsedRanges.push({ start: tagStart, end: blockEnd });
           callIndex++;
         } else {
+          const reason = allowSet && typeof parsed.name === "string" && !allowSet.has(parsed.name)
+            ? `tool '${parsed.name}' not in allowed set`
+            : "missing or invalid 'name'";
           console.error(
-            "[parseToolCalls] Missing or invalid 'name':",
+            `[parseToolCalls] Rejected: ${reason}:`,
             JSON.stringify(parsed).slice(0, 200)
           );
         }
@@ -217,7 +226,8 @@ export function createDoneChunk(
 export function cliResultToOpenai(
   result: ClaudeCliResult,
   requestId: string,
-  hasTools: boolean = false
+  hasTools: boolean = false,
+  allowedToolNames?: string[]
 ): OpenAIChatResponse {
   const modelName = result.modelUsage
     ? Object.keys(result.modelUsage)[0]
@@ -225,7 +235,7 @@ export function cliResultToOpenai(
 
   const resultText = result.result || "";
   const { text, toolCalls } = hasTools
-    ? parseToolCalls(resultText)
+    ? parseToolCalls(resultText, allowedToolNames)
     : { text: resultText, toolCalls: [] };
 
   const message: {

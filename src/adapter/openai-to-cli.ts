@@ -13,6 +13,7 @@ export interface CliInput {
   sessionId?: string;
   hasTools: boolean;
   toolSystemPrompt: string | null;
+  toolNames: string[];
 }
 
 const MODEL_MAP: Record<string, ClaudeModel> = {
@@ -278,5 +279,6 @@ export function openaiToCli(request: OpenAIChatRequest): CliInput {
     sessionId: request.user,
     hasTools: !!tools,
     toolSystemPrompt: tools ? toolsToSystemPrompt(tools, toolRequired) : null,
+    toolNames: tools ? tools.map((t) => t.function.name) : [],
   };
 }
