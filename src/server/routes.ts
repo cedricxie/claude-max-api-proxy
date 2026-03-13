@@ -487,6 +487,9 @@ async function handleStreamingResponse(
         }
 
         const doneChunk = createDoneChunk(requestId, lastModel);
+        if (finishReason === "tool_calls") {
+          doneChunk.choices[0].finish_reason = "tool_calls";
+        }
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
