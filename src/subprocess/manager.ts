@@ -22,6 +22,7 @@ export interface SubprocessOptions {
   useResume?: boolean;
   cwd?: string;
   timeout?: number;
+  systemPrompt?: string | null;
   toolSystemPrompt?: string | null;
   hasTools?: boolean;
 }
@@ -150,10 +151,18 @@ export class ClaudeSubprocess extends EventEmitter {
       }
     }
 
+    // Pass system prompt via --system-prompt flag so Claude CLI treats it as
+    // authoritative system instructions, not user text that could be ignored.
+    if (options.systemPrompt) {
+      args.push("--system-prompt", options.systemPrompt);
+    }
+
     // When custom tools are provided, inject tool definitions via system prompt
     // and disable built-in tools so Claude focuses on the custom ones.
     // --tools is variadic, so use "--" to prevent it from consuming the prompt.
     if (options.toolSystemPrompt) {
+      // If we already set --system-prompt, use --append to add tool defs.
+      // If no system prompt was set, --append-system-prompt appends to CLI defaults.
       args.push("--append-system-prompt", options.toolSystemPrompt);
       args.push("--tools", "", "--");
     }

@@ -13,6 +13,7 @@ export interface SubprocessOptions {
     useResume?: boolean;
     cwd?: string;
     timeout?: number;
+    systemPrompt?: string | null;
     toolSystemPrompt?: string | null;
     hasTools?: boolean;
 }

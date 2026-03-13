@@ -141,6 +141,7 @@ export async function handleChatCompletions(req, res) {
         }
         const cliInput = openaiToCli(body);
         const sessionInput = resolveSessionInput(body, cliInput);
+        sessionInput.systemPrompt = cliInput.systemPrompt || null;
         sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
         sessionInput.hasTools = cliInput.hasTools || false;
         const subprocess = new ClaudeSubprocess();
@@ -436,6 +437,7 @@ async function handleStreamingResponse(res, subprocess, sessionInput, requestId)
             model: sessionInput.model,
             sessionId: sessionInput.sessionId,
             useResume: sessionInput.useResume,
+            systemPrompt: sessionInput.systemPrompt,
             toolSystemPrompt: sessionInput.toolSystemPrompt,
             hasTools: sessionInput.hasTools,
         })
@@ -531,6 +533,7 @@ async function handleNonStreamingResponse(res, subprocess, sessionInput, request
             model: sessionInput.model,
             sessionId: sessionInput.sessionId,
             useResume: sessionInput.useResume,
+            systemPrompt: sessionInput.systemPrompt,
             toolSystemPrompt: sessionInput.toolSystemPrompt,
             hasTools: sessionInput.hasTools,
         })
