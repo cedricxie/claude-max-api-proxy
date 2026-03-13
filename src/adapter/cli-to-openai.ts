@@ -105,6 +105,28 @@ export function parseToolCalls(text: string): {
 
         // Validate required fields
         if (typeof parsed.name === "string" && parsed.name) {
+          // Ensure arguments is a JSON object string (OpenAI contract)
+          let argsStr: string;
+          if (typeof parsed.arguments === "string") {
+            // Validate it's a JSON object string
+            try {
+              const check = JSON.parse(parsed.arguments);
+              argsStr = typeof check === "object" && check !== null && !Array.isArray(check)
+                ? parsed.arguments
+                : JSON.stringify({ value: parsed.arguments });
+            } catch {
+              argsStr = JSON.stringify({ value: parsed.arguments });
+            }
+          } else if (
+            parsed.arguments &&
+            typeof parsed.arguments === "object" &&
+            !Array.isArray(parsed.arguments)
+          ) {
+            argsStr = JSON.stringify(parsed.arguments);
+          } else {
+            argsStr = JSON.stringify(parsed.arguments != null ? { value: parsed.arguments } : {});
+          }
+
           toolCalls.push({
             id:
               typeof parsed.id === "string" && parsed.id
@@ -113,10 +135,7 @@ export function parseToolCalls(text: string): {
             type: "function",
             function: {
               name: parsed.name as string,
-              arguments:
-                typeof parsed.arguments === "string"
-                  ? parsed.arguments
-                  : JSON.stringify(parsed.arguments || {}),
+              arguments: argsStr,
             },
           });
           parsedRanges.push({ start: tagStart, end: blockEnd });

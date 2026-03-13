@@ -46,7 +46,7 @@ export interface OpenAIChatRequest {
   presence_penalty?: number;
   user?: string; // Used for session mapping
   tools?: OpenAITool[];
-  tool_choice?: "none" | "auto" | { type: "function"; function: { name: string } };
+  tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
 }
 
 export interface OpenAIChatResponseChoice {

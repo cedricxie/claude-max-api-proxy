@@ -101,7 +101,33 @@ async function handleStreamingResponse(
     let isFirst = true;
     let lastModel = "claude-sonnet-4";
     let isComplete = false;
-    let fullStreamedText = "";
+    // When tools are present, we stream text incrementally but hold back
+    // content once we see the start of a potential <tool_call> tag.
+    // This avoids fully buffering the response while still catching tool calls.
+    let pendingBuffer = "";
+
+    /** Emit a text content chunk, handling the initial role emission */
+    function emitTextChunk(content: string): void {
+      if (!content || res.writableEnded) return;
+      const chunk = {
+        id: `chatcmpl-${requestId}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: lastModel,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: isFirst ? ("assistant" as const) : undefined,
+              content,
+            },
+            finish_reason: null,
+          },
+        ],
+      };
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      isFirst = false;
+    }
 
     res.on("close", () => {
       if (!isComplete) {
@@ -112,30 +138,27 @@ async function handleStreamingResponse(
 
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
       const text = event.event.delta?.text || "";
-      if (text && !res.writableEnded) {
-        if (hasTools) {
-          fullStreamedText += text;
-        } else {
-          const chunk = {
-            id: `chatcmpl-${requestId}`,
-            object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
-            model: lastModel,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  role: isFirst ? ("assistant" as const) : undefined,
-                  content: text,
-                },
-                finish_reason: null,
-              },
-            ],
-          };
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-          isFirst = false;
+      if (!text || res.writableEnded) return;
+
+      if (!hasTools) {
+        emitTextChunk(text);
+        return;
+      }
+
+      // Incremental streaming with tool-call awareness:
+      // Buffer text and flush everything before any `<tool_call>` prefix.
+      pendingBuffer += text;
+      const tagIdx = pendingBuffer.indexOf("<tool_call>");
+      if (tagIdx === -1) {
+        // No tool_call tag seen. Check if the tail could be a partial tag.
+        // "<tool_call>" is 11 chars; keep up to 10 chars as lookahead.
+        const safeEnd = Math.max(0, pendingBuffer.length - 10);
+        if (safeEnd > 0) {
+          emitTextChunk(pendingBuffer.slice(0, safeEnd));
+          pendingBuffer = pendingBuffer.slice(safeEnd);
         }
       }
+      // If tag found, hold the buffer — will be processed on result
     });
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
@@ -148,35 +171,39 @@ async function handleStreamingResponse(
         let finishReason: "stop" | "tool_calls" = "stop";
 
         if (hasTools) {
-          // Use result.result as authoritative source; fall back to
-          // buffered deltas only if result.result is absent.
-          const sourceText = result.result || fullStreamedText;
+          // Use result.result as authoritative source for tool-call parsing;
+          // fall back to pending buffer if result.result is absent.
+          const sourceText = result.result || pendingBuffer;
 
           if (sourceText) {
             const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
 
+            // Emit remaining text (already-streamed text was flushed
+            // incrementally; this covers text after or around tool calls)
             if (cleanText) {
-              const textChunk = {
-                id: `chatcmpl-${requestId}`,
-                object: "chat.completion.chunk",
-                created: Math.floor(Date.now() / 1000),
-                model: lastModel,
-                choices: [
-                  {
-                    index: 0,
-                    delta: {
-                      role: "assistant" as const,
-                      content: cleanText,
-                    },
-                    finish_reason: null,
-                  },
-                ],
-              };
-              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              emitTextChunk(cleanText);
             }
 
             if (toolCalls.length > 0) {
               finishReason = "tool_calls";
+              // Ensure role chunk is emitted before tool_calls
+              if (isFirst) {
+                const roleChunk = {
+                  id: `chatcmpl-${requestId}`,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: lastModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { role: "assistant" as const },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
+                isFirst = false;
+              }
               for (let i = 0; i < toolCalls.length; i++) {
                 const tc = toolCalls[i];
                 const toolChunk = {
@@ -207,6 +234,9 @@ async function handleStreamingResponse(
                 res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
               }
             }
+          } else if (pendingBuffer) {
+            // No result.result and no tool calls — flush remaining buffer
+            emitTextChunk(pendingBuffer);
           }
         }
 

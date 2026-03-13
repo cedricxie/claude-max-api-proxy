@@ -135,6 +135,7 @@ export class ClaudeSubprocess extends EventEmitter {
       "stream-json", // JSON streaming output
       "--verbose", // Required for stream-json
       "--include-partial-messages", // Enable streaming chunks
+      "--no-session-persistence", // Don't save sessions to disk
     ];
 
     if (options.useResume && options.sessionId) {

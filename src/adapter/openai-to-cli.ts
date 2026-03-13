@@ -157,7 +157,8 @@ export function messagesToPrompt(
         const toolContent = escapeStructuralTags(
           normalizeContent(msg.content)
         );
-        const toolCallId = (msg.tool_call_id || "").replace(/"/g, "");
+        // Sanitize tool_call_id: strip anything that could break XML attribute context
+        const toolCallId = (msg.tool_call_id || "").replace(/[^a-zA-Z0-9_\-]/g, "");
         parts.push(
           `<tool_result tool_call_id="${toolCallId}">\n${toolContent}\n</tool_result>\n`
         );
@@ -175,7 +176,7 @@ export function messagesToPrompt(
  * This is injected via --append-system-prompt so Claude treats it as
  * authoritative system-level instructions rather than user text.
  */
-function toolsToSystemPrompt(tools: OpenAITool[]): string {
+function toolsToSystemPrompt(tools: OpenAITool[], required: boolean = false): string {
   const toolDefs = tools
     .map((t) => {
       const fn = t.function;
@@ -196,7 +197,8 @@ You may include text before or after tool_call blocks. You may call multiple too
 Available tools:
 ${toolDefs}
 
-IMPORTANT: When the user's request requires using one of these tools, you MUST output the <tool_call> block. Do NOT say you cannot access the tool — the proxy handles execution.`;
+IMPORTANT: When the user's request requires using one of these tools, you MUST output the <tool_call> block. Do NOT say you cannot access the tool — the proxy handles execution.${required ? "\n\nYou MUST call at least one tool in your response. Do NOT respond with only text — a tool call is REQUIRED." : ""}`;
+
 }
 
 /**
@@ -222,22 +224,25 @@ export function openaiToCli(request: OpenAIChatRequest): CliInput {
   const toolChoice = request.tool_choice;
   let tools: OpenAITool[] | null = null;
 
+  let toolRequired = false;
+
   if (toolChoice === "none") {
-    // Caller explicitly disabled tools
     tools = null;
   } else if (request.tools && request.tools.length > 0) {
-    if (
+    if (toolChoice === "required") {
+      tools = request.tools;
+      toolRequired = true;
+    } else if (
       toolChoice &&
       typeof toolChoice === "object" &&
       toolChoice.type === "function" &&
       toolChoice.function?.name
     ) {
-      // Force a specific tool — filter to just that tool.
-      // If the named tool doesn't exist, expose nothing (same as "none").
       const forced = request.tools.filter(
         (t) => t.function.name === toolChoice.function.name
       );
       tools = forced.length > 0 ? forced : null;
+      toolRequired = !!tools; // forced function implies required
     } else {
       tools = request.tools;
     }
@@ -248,6 +253,6 @@ export function openaiToCli(request: OpenAIChatRequest): CliInput {
     model: extractModel(request.model),
     sessionId: request.user,
     hasTools: !!tools,
-    toolSystemPrompt: tools ? toolsToSystemPrompt(tools) : null,
+    toolSystemPrompt: tools ? toolsToSystemPrompt(tools, toolRequired) : null,
   };
 }
