@@ -105,14 +105,16 @@ export function parseToolCalls(text: string): {
 
         // Validate required fields
         if (typeof parsed.name === "string" && parsed.name) {
-          // Serialize arguments to a JSON string, preserving what the model produced.
-          // OpenAI contract expects a JSON object string, but we don't coerce/invent.
+          // Serialize arguments to a JSON string.
+          // OpenAI requires function.arguments to always be a string.
+          // Default to "{}" for missing/null args per OpenAI spec (required field).
           let argsStr: string;
           if (typeof parsed.arguments === "string") {
             argsStr = parsed.arguments;
           } else if (parsed.arguments != null) {
             argsStr = JSON.stringify(parsed.arguments);
           } else {
+            // Missing arguments — use empty object per OpenAI spec requirement
             argsStr = "{}";
           }
 
