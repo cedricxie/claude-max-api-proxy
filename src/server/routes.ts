@@ -198,22 +198,33 @@ export async function handleChatCompletions(
     sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
     sessionInput.hasTools = cliInput.hasTools || false;
 
-    const subprocess = new ClaudeSubprocess();
+    // Serialize concurrent requests for the same session to avoid
+    // race conditions in the CLI subprocess
+    const lockKey = sessionInput.conversationKey;
+    const releaseLock = lockKey
+      ? await sessionManager.acquireLock(lockKey)
+      : null;
 
-    if (stream) {
-      await handleStreamingResponse(
-        res,
-        subprocess,
-        sessionInput,
-        requestId
-      );
-    } else {
-      await handleNonStreamingResponse(
-        res,
-        subprocess,
-        sessionInput,
-        requestId
-      );
+    try {
+      const subprocess = new ClaudeSubprocess();
+
+      if (stream) {
+        await handleStreamingResponse(
+          res,
+          subprocess,
+          sessionInput,
+          requestId
+        );
+      } else {
+        await handleNonStreamingResponse(
+          res,
+          subprocess,
+          sessionInput,
+          requestId
+        );
+      }
+    } finally {
+      releaseLock?.();
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

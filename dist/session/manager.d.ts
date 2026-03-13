@@ -17,6 +17,7 @@ declare class SessionManager {
     private sessions;
     private loaded;
     private saveQueue;
+    private locks;
     /**
      * Load sessions from disk
      */
@@ -54,6 +55,15 @@ declare class SessionManager {
      * Get session count
      */
     get size(): number;
+    /**
+     * Acquire a per-session lock so concurrent requests for the same
+     * session are serialized. Returns a release function.
+     */
+    acquireLock(key: string): Promise<() => void>;
+    /**
+     * Evict oldest sessions if we exceed MAX_SESSIONS
+     */
+    private evictIfNeeded;
 }
 export declare const sessionManager: SessionManager;
 export {};

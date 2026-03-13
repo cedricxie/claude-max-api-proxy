@@ -27,10 +27,14 @@ const SESSION_FILE = path.join(
 // Session TTL: 24 hours
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Maximum number of sessions before forced eviction of oldest
+const MAX_SESSIONS = 1000;
+
 class SessionManager {
   private sessions: Map<string, SessionMapping> = new Map();
   private loaded: boolean = false;
   private saveQueue: Promise<void> = Promise.resolve();
+  private locks: Map<string, Promise<void>> = new Map();
 
   /**
    * Load sessions from disk
@@ -90,6 +94,7 @@ class SessionManager {
     };
 
     this.sessions.set(clawdbotId, mapping);
+    this.evictIfNeeded();
     console.log(
       `[SessionManager] Created session: ${clawdbotId} -> ${claudeSessionId}`
     );
@@ -171,6 +176,42 @@ class SessionManager {
    */
   get size(): number {
     return this.sessions.size;
+  }
+
+  /**
+   * Acquire a per-session lock so concurrent requests for the same
+   * session are serialized. Returns a release function.
+   */
+  async acquireLock(key: string): Promise<() => void> {
+    // Wait for any existing lock on this key
+    while (this.locks.has(key)) {
+      await this.locks.get(key);
+    }
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.locks.set(key, promise);
+    return () => {
+      this.locks.delete(key);
+      release();
+    };
+  }
+
+  /**
+   * Evict oldest sessions if we exceed MAX_SESSIONS
+   */
+  private evictIfNeeded(): void {
+    if (this.sessions.size <= MAX_SESSIONS) return;
+
+    const entries = Array.from(this.sessions.entries())
+      .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+
+    const toRemove = this.sessions.size - MAX_SESSIONS;
+    for (let i = 0; i < toRemove; i++) {
+      this.sessions.delete(entries[i][0]);
+    }
+    console.log(`[SessionManager] Evicted ${toRemove} oldest sessions (cap: ${MAX_SESSIONS})`);
   }
 }
 
