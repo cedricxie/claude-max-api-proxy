@@ -65,7 +65,10 @@ function extractJsonObject(text, start) {
     }
     return null;
 }
-export function parseToolCalls(text) {
+export function parseToolCalls(text, allowedToolNames) {
+    const allowSet = allowedToolNames?.length
+        ? new Set(allowedToolNames)
+        : null;
     const toolCalls = [];
     const parsedRanges = [];
     const OPEN_TAG = "<tool_call>";
@@ -87,8 +90,8 @@ export function parseToolCalls(text) {
                 closeStart++;
             if (text.startsWith(CLOSE_TAG, closeStart)) {
                 const blockEnd = closeStart + CLOSE_TAG.length;
-                // Validate required fields
-                if (typeof parsed.name === "string" && parsed.name) {
+                // Validate required fields and allowlist
+                if (typeof parsed.name === "string" && parsed.name && (!allowSet || allowSet.has(parsed.name))) {
                     // Serialize arguments to a JSON string.
                     // OpenAI requires function.arguments to always be a string.
                     // Default to "{}" for missing/null args per OpenAI spec (required field).
@@ -117,7 +120,10 @@ export function parseToolCalls(text) {
                     callIndex++;
                 }
                 else {
-                    console.error("[parseToolCalls] Missing or invalid 'name':", JSON.stringify(parsed).slice(0, 200));
+                    const reason = allowSet && typeof parsed.name === "string" && !allowSet.has(parsed.name)
+                        ? `tool '${parsed.name}' not in allowed set`
+                        : "missing or invalid 'name'";
+                    console.error(`[parseToolCalls] Rejected: ${reason}:`, JSON.stringify(parsed).slice(0, 200));
                 }
                 searchFrom = blockEnd;
             }
@@ -185,13 +191,13 @@ export function createDoneChunk(requestId, model) {
 /**
  * Convert Claude CLI result to OpenAI non-streaming response
  */
-export function cliResultToOpenai(result, requestId, hasTools = false) {
+export function cliResultToOpenai(result, requestId, hasTools = false, allowedToolNames) {
     const modelName = result.modelUsage
         ? Object.keys(result.modelUsage)[0]
         : "claude-sonnet-4";
     const resultText = result.result || "";
     const { text, toolCalls } = hasTools
-        ? parseToolCalls(resultText)
+        ? parseToolCalls(resultText, allowedToolNames)
         : { text: resultText, toolCalls: [] };
     const message = {
         role: "assistant",

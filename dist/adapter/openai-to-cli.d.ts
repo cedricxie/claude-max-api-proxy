@@ -10,6 +10,7 @@ export interface CliInput {
     sessionId?: string;
     hasTools: boolean;
     toolSystemPrompt: string | null;
+    toolNames: string[];
 }
 /**
  * Extract Claude model alias from request model string

@@ -244,6 +244,7 @@ export function openaiToCli(request) {
         sessionId: request.user,
         hasTools: !!tools,
         toolSystemPrompt: tools ? toolsToSystemPrompt(tools, toolRequired) : null,
+        toolNames: tools ? tools.map((t) => t.function.name) : [],
     };
 }
 //# sourceMappingURL=openai-to-cli.js.map

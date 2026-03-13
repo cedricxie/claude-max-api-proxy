@@ -144,6 +144,7 @@ export async function handleChatCompletions(req, res) {
         sessionInput.systemPrompt = cliInput.systemPrompt || null;
         sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
         sessionInput.hasTools = cliInput.hasTools || false;
+        sessionInput.toolNames = cliInput.toolNames || [];
         // Serialize concurrent requests for the same session to avoid
         // race conditions in the CLI subprocess
         const lockKey = sessionInput.conversationKey;
@@ -309,7 +310,7 @@ async function handleStreamingResponse(res, subprocess, sessionInput, requestId)
                     // fall back to pending buffer if result.result is absent.
                     const sourceText = result.result || pendingBuffer;
                     if (sourceText) {
-                        const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
+                        const { text: cleanText, toolCalls } = parseToolCalls(sourceText, sessionInput.toolNames);
                         // Only emit text that hasn't been streamed yet.
                         if (cleanText && cleanText.length > streamedCharCount) {
                             const remaining = cleanText.slice(streamedCharCount);
@@ -513,7 +514,7 @@ async function handleNonStreamingResponse(res, subprocess, sessionInput, request
         subprocess.on("close", (code) => {
             try {
                 if (finalResult) {
-                    res.json(cliResultToOpenai(finalResult, requestId, hasTools));
+                    res.json(cliResultToOpenai(finalResult, requestId, hasTools, sessionInput.toolNames));
                 }
                 else if (!res.headersSent) {
                     res.status(500).json({

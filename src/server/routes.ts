@@ -57,6 +57,7 @@ interface SessionInput {
   conversationKey: string | null;
   toolSystemPrompt?: string | null;
   hasTools?: boolean;
+  toolNames?: string[];
 }
 
 /**
@@ -197,6 +198,7 @@ export async function handleChatCompletions(
     sessionInput.systemPrompt = cliInput.systemPrompt || null;
     sessionInput.toolSystemPrompt = cliInput.toolSystemPrompt || null;
     sessionInput.hasTools = cliInput.hasTools || false;
+    sessionInput.toolNames = cliInput.toolNames || [];
 
     // Serialize concurrent requests for the same session to avoid
     // race conditions in the CLI subprocess
@@ -400,7 +402,7 @@ async function handleStreamingResponse(
           const sourceText = result.result || pendingBuffer;
 
           if (sourceText) {
-            const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
+            const { text: cleanText, toolCalls } = parseToolCalls(sourceText, sessionInput.toolNames);
 
             // Only emit text that hasn't been streamed yet.
             if (cleanText && cleanText.length > streamedCharCount) {
@@ -635,7 +637,7 @@ async function handleNonStreamingResponse(
     subprocess.on("close", (code: number | null) => {
       try {
         if (finalResult) {
-          res.json(cliResultToOpenai(finalResult, requestId, hasTools));
+          res.json(cliResultToOpenai(finalResult, requestId, hasTools, sessionInput.toolNames));
         } else if (!res.headersSent) {
           res.status(500).json({
             error: {

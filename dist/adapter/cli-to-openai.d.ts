@@ -7,7 +7,7 @@ import type { OpenAIChatResponse, OpenAIChatChunk, OpenAIToolCall } from "../typ
  * Extract text content from Claude CLI assistant message
  */
 export declare function extractTextContent(message: ClaudeCliAssistant): string;
-export declare function parseToolCalls(text: string): {
+export declare function parseToolCalls(text: string, allowedToolNames?: string[]): {
     text: string;
     toolCalls: OpenAIToolCall[];
 };
@@ -22,5 +22,5 @@ export declare function createDoneChunk(requestId: string, model: string): OpenA
 /**
  * Convert Claude CLI result to OpenAI non-streaming response
  */
-export declare function cliResultToOpenai(result: ClaudeCliResult, requestId: string, hasTools?: boolean): OpenAIChatResponse;
+export declare function cliResultToOpenai(result: ClaudeCliResult, requestId: string, hasTools?: boolean, allowedToolNames?: string[]): OpenAIChatResponse;
 //# sourceMappingURL=cli-to-openai.d.ts.map
