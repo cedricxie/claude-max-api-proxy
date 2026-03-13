@@ -105,26 +105,15 @@ export function parseToolCalls(text: string): {
 
         // Validate required fields
         if (typeof parsed.name === "string" && parsed.name) {
-          // Ensure arguments is a JSON object string (OpenAI contract)
+          // Serialize arguments to a JSON string, preserving what the model produced.
+          // OpenAI contract expects a JSON object string, but we don't coerce/invent.
           let argsStr: string;
           if (typeof parsed.arguments === "string") {
-            // Validate it's a JSON object string
-            try {
-              const check = JSON.parse(parsed.arguments);
-              argsStr = typeof check === "object" && check !== null && !Array.isArray(check)
-                ? parsed.arguments
-                : JSON.stringify({ value: parsed.arguments });
-            } catch {
-              argsStr = JSON.stringify({ value: parsed.arguments });
-            }
-          } else if (
-            parsed.arguments &&
-            typeof parsed.arguments === "object" &&
-            !Array.isArray(parsed.arguments)
-          ) {
+            argsStr = parsed.arguments;
+          } else if (parsed.arguments != null) {
             argsStr = JSON.stringify(parsed.arguments);
           } else {
-            argsStr = JSON.stringify(parsed.arguments != null ? { value: parsed.arguments } : {});
+            argsStr = "{}";
           }
 
           toolCalls.push({

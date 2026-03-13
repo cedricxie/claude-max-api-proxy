@@ -105,10 +105,13 @@ async function handleStreamingResponse(
     // content once we see the start of a potential <tool_call> tag.
     // This avoids fully buffering the response while still catching tool calls.
     let pendingBuffer = "";
+    // Track how many chars of text were already streamed to clients
+    let streamedCharCount = 0;
 
     /** Emit a text content chunk, handling the initial role emission */
-    function emitTextChunk(content: string): void {
+    function emitTextChunk(content: string, trackStreamed: boolean = true): void {
       if (!content || res.writableEnded) return;
+      if (trackStreamed) streamedCharCount += content.length;
       const chunk = {
         id: `chatcmpl-${requestId}`,
         object: "chat.completion.chunk",
@@ -178,10 +181,11 @@ async function handleStreamingResponse(
           if (sourceText) {
             const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
 
-            // Emit remaining text (already-streamed text was flushed
-            // incrementally; this covers text after or around tool calls)
-            if (cleanText) {
-              emitTextChunk(cleanText);
+            // Only emit text that hasn't been streamed yet.
+            // streamedCharCount tracks prefix text already sent incrementally.
+            if (cleanText && cleanText.length > streamedCharCount) {
+              const remaining = cleanText.slice(streamedCharCount);
+              if (remaining) emitTextChunk(remaining, false);
             }
 
             if (toolCalls.length > 0) {
