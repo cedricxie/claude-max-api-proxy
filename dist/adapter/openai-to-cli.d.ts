@@ -18,6 +18,11 @@ export declare function extractModel(model: string): ClaudeModel;
 /**
  * Extract system messages from the messages array.
  * Returns the concatenated system prompt text (or null if none).
+ * Multiple system messages are joined in original order with double newlines.
+ *
+ * Note: escapeStructuralTags is intentionally NOT applied here — system content
+ * is passed via --system-prompt flag (authoritative channel) and is never embedded
+ * in the user prompt string where structural tags could cause parsing confusion.
  */
 export declare function extractSystemPrompt(messages: OpenAIChatRequest["messages"]): string | null;
 /**
