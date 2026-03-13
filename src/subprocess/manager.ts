@@ -35,7 +35,7 @@ export interface SubprocessEvents {
   raw: (line: string) => void;
 }
 
-const DEFAULT_TIMEOUT = 300000; // 5 minutes
+const DEFAULT_TIMEOUT = 600000; // 10 minutes
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -53,9 +53,12 @@ export class ClaudeSubprocess extends EventEmitter {
     return new Promise((resolve, reject) => {
       try {
         // Use spawn() for security - no shell interpretation
+        // Unset CLAUDECODE so nested Claude sessions are allowed
+        const spawnEnv = { ...process.env };
+        delete spawnEnv.CLAUDECODE;
         this.process = spawn("claude", args, {
           cwd: options.cwd || process.cwd(),
-          env: { ...process.env },
+          env: spawnEnv,
           stdio: ["pipe", "pipe", "pipe"],
         });
 
@@ -135,7 +138,6 @@ export class ClaudeSubprocess extends EventEmitter {
       "stream-json", // JSON streaming output
       "--verbose", // Required for stream-json
       "--include-partial-messages", // Enable streaming chunks
-      "--no-session-persistence", // Don't save sessions to disk
     ];
 
     if (options.useResume && options.sessionId) {

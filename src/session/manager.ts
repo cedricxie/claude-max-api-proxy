@@ -15,6 +15,8 @@ export interface SessionMapping {
   createdAt: number;
   lastUsedAt: number;
   model: string;
+  cumulativeInputTokens: number;
+  lastTotalContext?: number;
 }
 
 const SESSION_FILE = path.join(
@@ -28,6 +30,7 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 class SessionManager {
   private sessions: Map<string, SessionMapping> = new Map();
   private loaded: boolean = false;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   /**
    * Load sessions from disk
@@ -49,11 +52,17 @@ class SessionManager {
   }
 
   /**
-   * Save sessions to disk
+   * Save sessions to disk.
+   * Serialized via a queue to prevent concurrent writes from corrupting the file.
    */
   async save(): Promise<void> {
-    const data = Object.fromEntries(this.sessions);
-    await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+    this.saveQueue = this.saveQueue.then(async () => {
+      const data = Object.fromEntries(this.sessions);
+      await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+    }).catch((err) => {
+      console.error("[SessionManager] Write error:", err);
+    });
+    return this.saveQueue;
   }
 
   /**
@@ -77,6 +86,7 @@ class SessionManager {
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       model,
+      cumulativeInputTokens: 0,
     };
 
     this.sessions.set(clawdbotId, mapping);
@@ -90,6 +100,19 @@ class SessionManager {
     );
 
     return claudeSessionId;
+  }
+
+  /**
+   * Add input tokens to a session's cumulative count
+   */
+  addTokens(clawdbotId: string, inputTokens: number): void {
+    const s = this.sessions.get(clawdbotId);
+    if (s && inputTokens > 0) {
+      s.cumulativeInputTokens = (s.cumulativeInputTokens || 0) + inputTokens;
+      this.save().catch((err) =>
+        console.error("[SessionManager] Save error:", err)
+      );
+    }
   }
 
   /**
