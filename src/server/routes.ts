@@ -1,24 +1,28 @@
 /**
  * API Route Handlers
  *
- * Implements OpenAI-compatible endpoints for Clawdbot integration
+ * Implements OpenAI-compatible endpoints with tool-calling support.
  */
 
 import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { openaiToCli } from "../adapter/openai-to-cli.js";
+import type { CliInput } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
+  parseToolCalls,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
-import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+import type {
+  ClaudeCliAssistant,
+  ClaudeCliResult,
+  ClaudeCliStreamEvent,
+} from "../types/claude-cli.js";
 
 /**
  * Handle POST /v1/chat/completions
- *
- * Main endpoint for chat requests, supports both streaming and non-streaming
  */
 export async function handleChatCompletions(
   req: Request,
@@ -29,8 +33,11 @@ export async function handleChatCompletions(
   const stream = body.stream === true;
 
   try {
-    // Validate request
-    if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+    if (
+      !body.messages ||
+      !Array.isArray(body.messages) ||
+      body.messages.length === 0
+    ) {
       res.status(400).json({
         error: {
           message: "messages is required and must be a non-empty array",
@@ -41,12 +48,11 @@ export async function handleChatCompletions(
       return;
     }
 
-    // Convert to CLI input format
     const cliInput = openaiToCli(body);
     const subprocess = new ClaudeSubprocess();
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
+      await handleStreamingResponse(res, subprocess, cliInput, requestId);
     } else {
       await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
     }
@@ -69,77 +75,179 @@ export async function handleChatCompletions(
 /**
  * Handle streaming response (SSE)
  *
- * IMPORTANT: The Express req.on("close") event fires when the request body
- * is fully received, NOT when the client disconnects. For SSE connections,
- * we use res.on("close") to detect actual client disconnection.
+ * When tools are present, text is buffered until completion so we can
+ * detect <tool_call> blocks and emit them as proper OpenAI tool_calls
+ * chunks instead of raw text.
+ *
+ * Uses result.result as authoritative source for tool-call parsing when
+ * available, falling back to buffered content_delta text.
  */
 async function handleStreamingResponse(
-  req: Request,
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: ReturnType<typeof openaiToCli>,
+  cliInput: CliInput,
   requestId: string
 ): Promise<void> {
-  // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Request-Id", requestId);
-
-  // CRITICAL: Flush headers immediately to establish SSE connection
-  // Without this, headers are buffered and client times out waiting
   res.flushHeaders();
-
-  // Send initial comment to confirm connection is alive
   res.write(":ok\n\n");
+
+  const hasTools = cliInput.hasTools;
 
   return new Promise<void>((resolve, reject) => {
     let isFirst = true;
     let lastModel = "claude-sonnet-4";
     let isComplete = false;
+    // When tools are present, we stream text incrementally but hold back
+    // content once we see the start of a potential <tool_call> tag.
+    // This avoids fully buffering the response while still catching tool calls.
+    let pendingBuffer = "";
+    // Track how many chars of text were already streamed to clients
+    let streamedCharCount = 0;
 
-    // Handle actual client disconnect (response stream closed)
+    /** Emit a text content chunk, handling the initial role emission */
+    function emitTextChunk(content: string, trackStreamed: boolean = true): void {
+      if (!content || res.writableEnded) return;
+      if (trackStreamed) streamedCharCount += content.length;
+      const chunk = {
+        id: `chatcmpl-${requestId}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: lastModel,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: isFirst ? ("assistant" as const) : undefined,
+              content,
+            },
+            finish_reason: null,
+          },
+        ],
+      };
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      isFirst = false;
+    }
+
     res.on("close", () => {
       if (!isComplete) {
-        // Client disconnected before response completed - kill subprocess
         subprocess.kill();
       }
       resolve();
     });
 
-    // Handle streaming content deltas
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
       const text = event.event.delta?.text || "";
-      if (text && !res.writableEnded) {
-        const chunk = {
-          id: `chatcmpl-${requestId}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model: lastModel,
-          choices: [{
-            index: 0,
-            delta: {
-              role: isFirst ? "assistant" : undefined,
-              content: text,
-            },
-            finish_reason: null,
-          }],
-        };
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-        isFirst = false;
+      if (!text || res.writableEnded) return;
+
+      if (!hasTools) {
+        emitTextChunk(text);
+        return;
       }
+
+      // Incremental streaming with tool-call awareness:
+      // Buffer text and flush everything before any `<tool_call>` prefix.
+      pendingBuffer += text;
+      const tagIdx = pendingBuffer.indexOf("<tool_call>");
+      if (tagIdx === -1) {
+        // No tool_call tag seen. Check if the tail could be a partial tag.
+        // "<tool_call>" is 11 chars; keep up to 10 chars as lookahead.
+        const safeEnd = Math.max(0, pendingBuffer.length - 10);
+        if (safeEnd > 0) {
+          emitTextChunk(pendingBuffer.slice(0, safeEnd));
+          pendingBuffer = pendingBuffer.slice(safeEnd);
+        }
+      }
+      // If tag found, hold the buffer — will be processed on result
     });
 
-    // Handle final assistant message (for model name)
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
       lastModel = message.message.model;
     });
 
-    subprocess.on("result", (_result: ClaudeCliResult) => {
+    subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
       if (!res.writableEnded) {
-        // Send final done chunk with finish_reason
+        let finishReason: "stop" | "tool_calls" = "stop";
+
+        if (hasTools) {
+          // Use result.result as authoritative source for tool-call parsing;
+          // fall back to pending buffer if result.result is absent.
+          const sourceText = result.result || pendingBuffer;
+
+          if (sourceText) {
+            const { text: cleanText, toolCalls } = parseToolCalls(sourceText);
+
+            // Only emit text that hasn't been streamed yet.
+            // streamedCharCount tracks prefix text already sent incrementally.
+            if (cleanText && cleanText.length > streamedCharCount) {
+              const remaining = cleanText.slice(streamedCharCount);
+              if (remaining) emitTextChunk(remaining, false);
+            }
+
+            if (toolCalls.length > 0) {
+              finishReason = "tool_calls";
+              // Ensure role chunk is emitted before tool_calls
+              if (isFirst) {
+                const roleChunk = {
+                  id: `chatcmpl-${requestId}`,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: lastModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { role: "assistant" as const },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
+                isFirst = false;
+              }
+              for (let i = 0; i < toolCalls.length; i++) {
+                const tc = toolCalls[i];
+                const toolChunk = {
+                  id: `chatcmpl-${requestId}`,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: lastModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: i,
+                            id: tc.id,
+                            type: "function" as const,
+                            function: {
+                              name: tc.function.name,
+                              arguments: tc.function.arguments,
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
+              }
+            }
+          } else if (pendingBuffer) {
+            // No result.result and no tool calls — flush remaining buffer
+            emitTextChunk(pendingBuffer);
+          }
+        }
+
         const doneChunk = createDoneChunk(requestId, lastModel);
+        if (finishReason === "tool_calls") {
+          doneChunk.choices[0].finish_reason = "tool_calls";
+        }
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
@@ -152,7 +260,11 @@ async function handleStreamingResponse(
       if (!res.writableEnded) {
         res.write(
           `data: ${JSON.stringify({
-            error: { message: error.message, type: "server_error", code: null },
+            error: {
+              message: error.message,
+              type: "server_error",
+              code: null,
+            },
           })}\n\n`
         );
         res.end();
@@ -161,13 +273,17 @@ async function handleStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
-      // Subprocess exited - ensure response is closed
       if (!res.writableEnded) {
         if (code !== 0 && !isComplete) {
-          // Abnormal exit without result - send error
-          res.write(`data: ${JSON.stringify({
-            error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
-          })}\n\n`);
+          res.write(
+            `data: ${JSON.stringify({
+              error: {
+                message: `Process exited with code ${code}`,
+                type: "server_error",
+                code: null,
+              },
+            })}\n\n`
+          );
         }
         res.write("data: [DONE]\n\n");
         res.end();
@@ -175,14 +291,17 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
-    subprocess.start(cliInput.prompt, {
-      model: cliInput.model,
-      sessionId: cliInput.sessionId,
-    }).catch((err) => {
-      console.error("[Streaming] Subprocess start error:", err);
-      reject(err);
-    });
+    subprocess
+      .start(cliInput.prompt, {
+        model: cliInput.model,
+        sessionId: cliInput.sessionId,
+        toolSystemPrompt: cliInput.toolSystemPrompt,
+        hasTools: cliInput.hasTools,
+      })
+      .catch((err) => {
+        console.error("[Streaming] Subprocess start error:", err);
+        reject(err);
+      });
   });
 }
 
@@ -192,7 +311,7 @@ async function handleStreamingResponse(
 async function handleNonStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: ReturnType<typeof openaiToCli>,
+  cliInput: CliInput,
   requestId: string
 ): Promise<void> {
   return new Promise((resolve) => {
@@ -216,7 +335,7 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId));
+        res.json(cliResultToOpenai(finalResult, requestId, cliInput.hasTools));
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {
@@ -229,11 +348,12 @@ async function handleNonStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
     subprocess
       .start(cliInput.prompt, {
         model: cliInput.model,
         sessionId: cliInput.sessionId,
+        toolSystemPrompt: cliInput.toolSystemPrompt,
+        hasTools: cliInput.hasTools,
       })
       .catch((error) => {
         res.status(500).json({
@@ -250,8 +370,6 @@ async function handleNonStreamingResponse(
 
 /**
  * Handle GET /v1/models
- *
- * Returns available models
  */
 export function handleModels(_req: Request, res: Response): void {
   res.json({
@@ -281,8 +399,6 @@ export function handleModels(_req: Request, res: Response): void {
 
 /**
  * Handle GET /health
- *
- * Health check endpoint
  */
 export function handleHealth(_req: Request, res: Response): void {
   res.json({
