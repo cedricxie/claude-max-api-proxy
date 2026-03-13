@@ -30,6 +30,7 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 class SessionManager {
   private sessions: Map<string, SessionMapping> = new Map();
   private loaded: boolean = false;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   /**
    * Load sessions from disk
@@ -51,11 +52,17 @@ class SessionManager {
   }
 
   /**
-   * Save sessions to disk
+   * Save sessions to disk.
+   * Serialized via a queue to prevent concurrent writes from corrupting the file.
    */
   async save(): Promise<void> {
-    const data = Object.fromEntries(this.sessions);
-    await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+    this.saveQueue = this.saveQueue.then(async () => {
+      const data = Object.fromEntries(this.sessions);
+      await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+    }).catch((err) => {
+      console.error("[SessionManager] Write error:", err);
+    });
+    return this.saveQueue;
   }
 
   /**

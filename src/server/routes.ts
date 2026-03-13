@@ -24,6 +24,30 @@ import type {
 } from "../types/claude-cli.js";
 import { sessionManager } from "../session/manager.js";
 
+/**
+ * Normalize message content to a stable string for hashing.
+ * Handles both string and array-of-parts formats so that
+ * semantically identical content produces the same key.
+ */
+function normalizeContentForKey(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (content == null) return "";
+  if (Array.isArray(content)) {
+    return content
+      .map((p: unknown) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          const obj = p as Record<string, unknown>;
+          if (typeof obj.text === "string") return obj.text;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return JSON.stringify(content);
+}
+
 interface SessionInput {
   prompt: string;
   model: string;
@@ -49,17 +73,11 @@ function deriveConversationKey(
   const firstUser = messages.find((m) => m.role === "user");
   if (!firstUser) return null;
 
-  const userContent =
-    typeof firstUser.content === "string"
-      ? firstUser.content
-      : JSON.stringify(firstUser.content);
+  const userContent = normalizeContentForKey(firstUser.content);
 
   const sys = messages.find((m) => m.role === "system");
   const sysPrefix = sys
-    ? (typeof sys.content === "string"
-        ? sys.content
-        : JSON.stringify(sys.content)
-      ).slice(0, 200)
+    ? normalizeContentForKey(sys.content).slice(0, 200)
     : "";
 
   return createHash("sha256")
@@ -104,6 +122,19 @@ function resolveSessionInput(
       existing.model
     );
     const lastMessage = extractLastUserMessage(body.messages);
+    if (!lastMessage) {
+      // No user message found — can't resume with empty prompt, send full prompt
+      console.log(
+        `[Session] No user message for resume, sending full prompt for key "${conversationKey}"`
+      );
+      return {
+        prompt: cliInput.prompt,
+        model: existing.model,
+        sessionId,
+        useResume: true,
+        conversationKey,
+      };
+    }
     console.log(
       `[Session] Resuming session ${sessionId} for key "${conversationKey}" (${existing.cumulativeInputTokens || 0} tokens)`
     );
@@ -547,6 +578,28 @@ async function handleNonStreamingResponse(
         (contextUsage?.cache_creation_input_tokens || 0);
       if (conversationKey && contextGrowth > 0) {
         sessionManager.addTokens(conversationKey, contextGrowth);
+      }
+
+      // Detect CLI auto-compaction (same logic as streaming handler)
+      if (conversationKey && sessionInput.useResume) {
+        const session = sessionManager.get(conversationKey);
+        const totalContext =
+          (contextUsage?.input_tokens || 0) +
+          (contextUsage?.cache_read_input_tokens || 0) +
+          (contextUsage?.cache_creation_input_tokens || 0);
+        if (
+          session?.lastTotalContext &&
+          totalContext > 0 &&
+          totalContext < session.lastTotalContext * 0.5
+        ) {
+          console.log(
+            `[Session] Compaction detected for "${conversationKey}" — context dropped ${session.lastTotalContext} → ${totalContext}. Resetting session.`
+          );
+          sessionManager.delete(conversationKey);
+        } else if (session && totalContext > 0) {
+          session.lastTotalContext = totalContext;
+          sessionManager.save().catch(() => {});
+        }
       }
     });
 
