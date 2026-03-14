@@ -9,7 +9,7 @@ import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli, extractLastUserMessage } from "../adapter/openai-to-cli.js";
+import { openaiToCli, extractLastUserMessage, extractNewTurnContent } from "../adapter/openai-to-cli.js";
 import type { CliInput } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -123,11 +123,13 @@ function resolveSessionInput(
       conversationKey,
       existing.model
     );
-    const lastMessage = extractLastUserMessage(body.messages);
-    if (!lastMessage) {
-      // No user message found — can't resume with empty prompt, send full prompt
+    // Extract new turn content — includes tool results + latest user message.
+    // This is critical: without tool results, Claude can't see tool execution output.
+    const newContent = extractNewTurnContent(body.messages);
+    if (!newContent) {
+      // No new content found — can't resume with empty prompt, send full prompt
       console.log(
-        `[Session] No user message for resume, sending full prompt for key "${conversationKey}"`
+        `[Session] No new content for resume, sending full prompt for key "${conversationKey}"`
       );
       return {
         prompt: cliInput.prompt,
@@ -141,7 +143,7 @@ function resolveSessionInput(
       `[Session] Resuming session ${sessionId} for key "${conversationKey}" (${existing.cumulativeInputTokens || 0} tokens)`
     );
     return {
-      prompt: lastMessage,
+      prompt: newContent,
       model: existing.model,
       sessionId,
       useResume: true,

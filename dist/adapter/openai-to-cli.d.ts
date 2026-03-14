@@ -41,6 +41,20 @@ export declare function messagesToPrompt(messages: OpenAIChatRequest["messages"]
  */
 export declare function extractLastUserMessage(messages: OpenAIChatRequest["messages"]): string;
 /**
+ * Extract new turn content for session resume — includes tool results
+ * and the latest user message.
+ *
+ * When resuming a Claude CLI session, the CLI already has conversation
+ * history up to its last assistant response. We need to send everything
+ * that happened AFTER that last assistant response:
+ *   - tool result messages (from tool calls Claude made)
+ *   - new user messages
+ *
+ * Without this, tool results are silently dropped on resume and Claude
+ * reports "tools didn't return results".
+ */
+export declare function extractNewTurnContent(messages: OpenAIChatRequest["messages"]): string;
+/**
  * Convert OpenAI chat request to CLI input format
  */
 export declare function openaiToCli(request: OpenAIChatRequest): CliInput;
