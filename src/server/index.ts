@@ -7,6 +7,7 @@
 import express, { Express, Request, Response, NextFunction } from "express";
 import { createServer, Server } from "http";
 import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
+import { sessionReady } from "../session/manager.js";
 
 export interface ServerConfig {
   port: number;
@@ -86,6 +87,9 @@ export async function startServer(config: ServerConfig): Promise<Server> {
     console.log("[Server] Already running, returning existing instance");
     return serverInstance;
   }
+
+  // Ensure sessions are loaded from disk before accepting requests
+  await sessionReady;
 
   const app = createApp();
 

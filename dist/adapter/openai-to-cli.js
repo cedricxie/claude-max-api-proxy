@@ -205,7 +205,7 @@ IMPORTANT: When the user's request requires using one of these tools, you MUST o
 export function extractLastUserMessage(messages) {
     for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role === "user") {
-            return normalizeContent(messages[i].content);
+            return escapeStructuralTags(normalizeContent(messages[i].content));
         }
     }
     return "";

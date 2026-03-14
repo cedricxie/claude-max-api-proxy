@@ -69,5 +69,6 @@ declare class SessionManager {
     private evictIfNeeded;
 }
 export declare const sessionManager: SessionManager;
+export declare const sessionReady: Promise<void>;
 export {};
 //# sourceMappingURL=manager.d.ts.map

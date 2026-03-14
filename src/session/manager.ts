@@ -252,8 +252,8 @@ class SessionManager {
 // Singleton instance
 export const sessionManager = new SessionManager();
 
-// Initialize on module load
-sessionManager.load().catch((err) =>
+// Initialize on module load — await sessionReady before serving requests
+export const sessionReady = sessionManager.load().catch((err) =>
   console.error("[SessionManager] Load error:", err)
 );
 
