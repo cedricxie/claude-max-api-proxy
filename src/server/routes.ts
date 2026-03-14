@@ -530,8 +530,9 @@ async function handleStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
-      if (!res.writableEnded) {
-        if (code !== 0 && !isComplete) {
+      if (!isComplete && !res.writableEnded) {
+        // Only handle close if result handler didn't already finish the response
+        if (code !== 0) {
           res.write(
             `data: ${JSON.stringify({
               error: {

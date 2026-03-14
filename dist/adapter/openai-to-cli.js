@@ -34,11 +34,9 @@ export function extractModel(model) {
  * so user/tool content cannot forge role boundaries or tool calls.
  */
 function escapeStructuralTags(text) {
+    // Unified regex: escape all structural tags, with or without attributes
     return text
-        .replace(/<\/?system>/g, (m) => `&lt;${m.slice(1)}`)
-        .replace(/<\/?previous_response>/g, (m) => `&lt;${m.slice(1)}`)
-        .replace(/<\/?tool_call>/g, (m) => `&lt;${m.slice(1)}`)
-        .replace(/<\/?tool_result[^>]*>/g, (m) => `&lt;${m.slice(1)}`);
+        .replace(/<\/?(system|previous_response|tool_call|tool_result)[\s>\/][^>]*>|<\/?(system|previous_response|tool_call|tool_result)>/g, (m) => `&lt;${m.slice(1)}`);
 }
 /**
  * Normalize message content to string.
@@ -147,7 +145,10 @@ export function messagesToPrompt(messages) {
                         else {
                             argsObj = fn.arguments;
                         }
-                        const callObj = { id: tc.id || "", name: fn.name, arguments: argsObj };
+                        // Sanitize id and name to prevent structural injection
+                        const safeId = (tc.id || "").replace(/[^a-zA-Z0-9_\-]/g, "");
+                        const safeName = (fn.name || "").replace(/[^a-zA-Z0-9_\-]/g, "");
+                        const callObj = { id: safeId, name: safeName, arguments: argsObj };
                         toolCallParts.push(`<tool_call>\n${JSON.stringify(callObj)}\n</tool_call>`);
                     }
                     parts.push(`<previous_response>\n${toolCallParts.join("\n")}\n</previous_response>\n`);

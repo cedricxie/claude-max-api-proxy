@@ -43,7 +43,9 @@ class SessionManager {
     async save() {
         this.saveQueue = this.saveQueue.then(async () => {
             const data = Object.fromEntries(this.sessions);
-            await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+            await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2), {
+                mode: 0o600,
+            });
         }).catch((err) => {
             console.error("[SessionManager] Write error:", err);
         });
@@ -136,18 +138,47 @@ class SessionManager {
     /**
      * Acquire a per-session lock so concurrent requests for the same
      * session are serialized. Returns a release function.
+     *
+     * Includes a safety timeout (10 min) to prevent permanent hangs
+     * if a lock holder crashes without releasing.
      */
     async acquireLock(key) {
-        // Wait for any existing lock on this key
+        const LOCK_TIMEOUT_MS = 600000; // 10 minutes
+        // Wait for any existing lock on this key, with timeout.
+        // Use while loop so 3+ concurrent requests properly serialize.
         while (this.locks.has(key)) {
-            await this.locks.get(key);
+            const existing = this.locks.get(key);
+            let waitTimer;
+            await Promise.race([
+                existing,
+                new Promise((resolve) => {
+                    waitTimer = setTimeout(() => {
+                        console.error(`[SessionManager] Lock timeout for key "${key}" — forcing release`);
+                        this.locks.delete(key);
+                        resolve();
+                    }, LOCK_TIMEOUT_MS);
+                    waitTimer.unref();
+                }),
+            ]);
+            if (waitTimer)
+                clearTimeout(waitTimer);
         }
         let release;
         const promise = new Promise((resolve) => {
             release = resolve;
         });
         this.locks.set(key, promise);
+        // Auto-release after timeout as a safety net
+        const autoRelease = setTimeout(() => {
+            if (this.locks.get(key) === promise) {
+                console.error(`[SessionManager] Auto-releasing stale lock for key "${key}"`);
+                this.locks.delete(key);
+                release();
+            }
+        }, LOCK_TIMEOUT_MS);
+        autoRelease.unref();
         return () => {
+            clearTimeout(autoRelease);
             this.locks.delete(key);
             release();
         };
