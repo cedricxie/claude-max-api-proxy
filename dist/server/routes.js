@@ -503,13 +503,15 @@ async function handleNonStreamingResponse(res, subprocess, sessionInput, request
         });
         subprocess.on("error", (error) => {
             console.error("[NonStreaming] Error:", error.message);
-            res.status(500).json({
-                error: {
-                    message: error.message,
-                    type: "server_error",
-                    code: null,
-                },
-            });
+            if (!res.headersSent) {
+                res.status(500).json({
+                    error: {
+                        message: error.message,
+                        type: "server_error",
+                        code: null,
+                    },
+                });
+            }
             resolve();
         });
         subprocess.on("close", (code) => {
@@ -551,13 +553,15 @@ async function handleNonStreamingResponse(res, subprocess, sessionInput, request
             hasTools: sessionInput.hasTools,
         })
             .catch((error) => {
-            res.status(500).json({
-                error: {
-                    message: error.message,
-                    type: "server_error",
-                    code: null,
-                },
-            });
+            if (!res.headersSent) {
+                res.status(500).json({
+                    error: {
+                        message: error.message,
+                        type: "server_error",
+                        code: null,
+                    },
+                });
+            }
             resolve();
         });
     });

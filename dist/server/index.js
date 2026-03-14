@@ -6,6 +6,7 @@
 import express from "express";
 import { createServer } from "http";
 import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
+import { sessionReady } from "../session/manager.js";
 let serverInstance = null;
 /**
  * Create and configure the Express app
@@ -68,6 +69,8 @@ export async function startServer(config) {
         console.log("[Server] Already running, returning existing instance");
         return serverInstance;
     }
+    // Ensure sessions are loaded from disk before accepting requests
+    await sessionReady;
     const app = createApp();
     return new Promise((resolve, reject) => {
         serverInstance = createServer(app);

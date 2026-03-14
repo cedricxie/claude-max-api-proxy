@@ -236,7 +236,7 @@ export function extractLastUserMessage(
 ): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "user") {
-      return normalizeContent(messages[i].content);
+      return escapeStructuralTags(normalizeContent(messages[i].content));
     }
   }
   return "";
