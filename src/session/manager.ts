@@ -190,21 +190,23 @@ class SessionManager {
   async acquireLock(key: string): Promise<() => void> {
     const LOCK_TIMEOUT_MS = 600000; // 10 minutes
 
-    // Wait for any existing lock on this key, with timeout
-    if (this.locks.has(key)) {
+    // Wait for any existing lock on this key, with timeout.
+    // Use while loop so 3+ concurrent requests properly serialize.
+    while (this.locks.has(key)) {
+      const existing = this.locks.get(key)!;
+      let waitTimer: NodeJS.Timeout | undefined;
       await Promise.race([
-        this.locks.get(key),
+        existing,
         new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
+          waitTimer = setTimeout(() => {
             console.error(`[SessionManager] Lock timeout for key "${key}" — forcing release`);
             this.locks.delete(key);
             resolve();
           }, LOCK_TIMEOUT_MS);
-          timer.unref();
-          // Also resolve if the lock clears normally
-          this.locks.get(key)?.then(resolve);
+          waitTimer.unref();
         }),
       ]);
+      if (waitTimer) clearTimeout(waitTimer);
     }
 
     let release!: () => void;
