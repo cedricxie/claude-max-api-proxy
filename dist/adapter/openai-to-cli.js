@@ -243,12 +243,7 @@ export function extractNewTurnContent(messages) {
     if (newMessages.length === 0) {
         return "";
     }
-    // Check if there are any tool results — if not, just return the last user message
-    const hasToolResults = newMessages.some((m) => m.role === "tool");
-    if (!hasToolResults) {
-        return extractLastUserMessage(messages);
-    }
-    // Format tool results and user messages for the resume prompt
+    // Format all new messages (tool results + user messages) for the resume prompt
     const parts = [];
     for (const msg of newMessages) {
         switch (msg.role) {

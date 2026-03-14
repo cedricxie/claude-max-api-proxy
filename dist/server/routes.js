@@ -89,13 +89,16 @@ function resolveSessionInput(body, cliInput) {
         // This is critical: without tool results, Claude can't see tool execution output.
         const newContent = extractNewTurnContent(body.messages);
         if (!newContent) {
-            // No new content found — can't resume with empty prompt, send full prompt
-            console.log(`[Session] No new content for resume, sending full prompt for key "${conversationKey}"`);
+            // No new content found — can't resume with empty prompt.
+            // Delete stale session and start fresh to avoid duplicating history.
+            sessionManager.delete(conversationKey);
+            const freshSessionId = sessionManager.getOrCreate(conversationKey, cliInput.model);
+            console.log(`[Session] No new content for resume, starting fresh session ${freshSessionId} for key "${conversationKey}"`);
             return {
                 prompt: cliInput.prompt,
-                model: existing.model,
-                sessionId,
-                useResume: true,
+                model: cliInput.model,
+                sessionId: freshSessionId,
+                useResume: false,
                 conversationKey,
             };
         }

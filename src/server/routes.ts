@@ -9,7 +9,7 @@ import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli, extractLastUserMessage, extractNewTurnContent } from "../adapter/openai-to-cli.js";
+import { openaiToCli, extractNewTurnContent } from "../adapter/openai-to-cli.js";
 import type { CliInput } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -127,15 +127,21 @@ function resolveSessionInput(
     // This is critical: without tool results, Claude can't see tool execution output.
     const newContent = extractNewTurnContent(body.messages);
     if (!newContent) {
-      // No new content found — can't resume with empty prompt, send full prompt
+      // No new content found — can't resume with empty prompt.
+      // Delete stale session and start fresh to avoid duplicating history.
+      sessionManager.delete(conversationKey);
+      const freshSessionId = sessionManager.getOrCreate(
+        conversationKey,
+        cliInput.model
+      );
       console.log(
-        `[Session] No new content for resume, sending full prompt for key "${conversationKey}"`
+        `[Session] No new content for resume, starting fresh session ${freshSessionId} for key "${conversationKey}"`
       );
       return {
         prompt: cliInput.prompt,
-        model: existing.model,
-        sessionId,
-        useResume: true,
+        model: cliInput.model,
+        sessionId: freshSessionId,
+        useResume: false,
         conversationKey,
       };
     }
