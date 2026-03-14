@@ -7,7 +7,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli, extractLastUserMessage } from "../adapter/openai-to-cli.js";
+import { openaiToCli, extractNewTurnContent } from "../adapter/openai-to-cli.js";
 import { cliResultToOpenai, createDoneChunk, parseToolCalls, } from "../adapter/cli-to-openai.js";
 import { sessionManager } from "../session/manager.js";
 /**
@@ -85,21 +85,26 @@ function resolveSessionInput(body, cliInput) {
         // Resume: only send the latest user message — Claude has the rest in its session file
         // Call getOrCreate (not just get) so lastUsedAt is updated and session won't expire
         const sessionId = sessionManager.getOrCreate(conversationKey, existing.model);
-        const lastMessage = extractLastUserMessage(body.messages);
-        if (!lastMessage) {
-            // No user message found — can't resume with empty prompt, send full prompt
-            console.log(`[Session] No user message for resume, sending full prompt for key "${conversationKey}"`);
+        // Extract new turn content — includes tool results + latest user message.
+        // This is critical: without tool results, Claude can't see tool execution output.
+        const newContent = extractNewTurnContent(body.messages);
+        if (!newContent) {
+            // No new content found — can't resume with empty prompt.
+            // Delete stale session and start fresh to avoid duplicating history.
+            sessionManager.delete(conversationKey);
+            const freshSessionId = sessionManager.getOrCreate(conversationKey, cliInput.model);
+            console.log(`[Session] No new content for resume, starting fresh session ${freshSessionId} for key "${conversationKey}"`);
             return {
                 prompt: cliInput.prompt,
-                model: existing.model,
-                sessionId,
-                useResume: true,
+                model: cliInput.model,
+                sessionId: freshSessionId,
+                useResume: false,
                 conversationKey,
             };
         }
         console.log(`[Session] Resuming session ${sessionId} for key "${conversationKey}" (${existing.cumulativeInputTokens || 0} tokens)`);
         return {
-            prompt: lastMessage,
+            prompt: newContent,
             model: existing.model,
             sessionId,
             useResume: true,

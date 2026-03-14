@@ -215,8 +215,10 @@ function toolsToSystemPrompt(tools: OpenAITool[], required: boolean = false): st
 
 Format (output this exactly):
 <tool_call>
-{"name": "tool_name", "arguments": {"param1": "value1"}}
+{"id": "call_1", "name": "tool_name", "arguments": {"param1": "value1"}}
 </tool_call>
+
+IMPORTANT: Always include a unique "id" field in each tool call (e.g. "call_1", "call_2"). This ID is used to match tool results back to the corresponding tool call.
 
 You may include text before or after tool_call blocks. You may call multiple tools using multiple <tool_call> blocks.
 
@@ -240,6 +242,70 @@ export function extractLastUserMessage(
     }
   }
   return "";
+}
+
+/**
+ * Extract new turn content for session resume — includes tool results
+ * and the latest user message.
+ *
+ * When resuming a Claude CLI session, the CLI already has conversation
+ * history up to its last assistant response. We need to send everything
+ * that happened AFTER that last assistant response:
+ *   - tool result messages (from tool calls Claude made)
+ *   - new user messages
+ *
+ * Without this, tool results are silently dropped on resume and Claude
+ * reports "tools didn't return results".
+ */
+export function extractNewTurnContent(
+  messages: OpenAIChatRequest["messages"]
+): string {
+  // Find the last assistant message — everything after it is new
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+
+  // No assistant message found — fall back to last user message
+  if (lastAssistantIdx === -1) {
+    return extractLastUserMessage(messages);
+  }
+
+  // Collect all messages after the last assistant message
+  const newMessages = messages.slice(lastAssistantIdx + 1);
+  if (newMessages.length === 0) {
+    return "";
+  }
+
+  // Format all new messages (tool results + user messages) for the resume prompt
+  const parts: string[] = [];
+  for (const msg of newMessages) {
+    switch (msg.role) {
+      case "tool": {
+        const toolContent = escapeStructuralTags(
+          normalizeContent(msg.content)
+        );
+        const toolCallId = (msg.tool_call_id || "").replace(
+          /[^a-zA-Z0-9_\-]/g,
+          ""
+        );
+        parts.push(
+          `<tool_result tool_call_id="${toolCallId}">\n${toolContent}\n</tool_result>`
+        );
+        break;
+      }
+      case "user": {
+        parts.push(escapeStructuralTags(normalizeContent(msg.content)));
+        break;
+      }
+      // Skip system (handled separately) and assistant (already in CLI session)
+    }
+  }
+
+  return parts.join("\n\n").trim();
 }
 
 /**
