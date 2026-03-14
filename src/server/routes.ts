@@ -354,6 +354,30 @@ async function handleStreamingResponse(
     subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
 
+      // Handle CLI error results (auth expired, context exceeded, etc.)
+      if (result.is_error || result.subtype === "error") {
+        console.error("[Streaming] CLI error result:", result.result?.slice(0, 200));
+        if (!res.writableEnded) {
+          res.write(
+            `data: ${JSON.stringify({
+              error: {
+                message: result.result || "Claude CLI returned an error",
+                type: "server_error",
+                code: "cli_error",
+              },
+            })}\n\n`
+          );
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
+        // Reset session on error to avoid resuming a broken state
+        if (conversationKey) {
+          sessionManager.delete(conversationKey);
+        }
+        resolve();
+        return;
+      }
+
       // Use lastAssistantUsage (last API call) for context-related metrics.
       // result.usage is cumulative across all tool-use turns and would
       // inflate context size by N× where N = number of turns.
@@ -579,6 +603,7 @@ async function handleNonStreamingResponse(
 
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
+    let cliErrorMessage: string | null = null;
     let lastAssistantUsage: ClaudeCliAssistant["message"]["usage"] | null =
       null;
 
@@ -589,6 +614,16 @@ async function handleNonStreamingResponse(
     });
 
     subprocess.on("result", (result: ClaudeCliResult) => {
+      // Handle CLI error results (auth expired, context exceeded, etc.)
+      if (result.is_error || result.subtype === "error") {
+        console.error("[NonStreaming] CLI error result:", result.result?.slice(0, 200));
+        cliErrorMessage = result.result || "Claude CLI returned an error";
+        if (conversationKey) {
+          sessionManager.delete(conversationKey);
+        }
+        return;
+      }
+
       finalResult = result;
 
       // Track context growth
@@ -644,9 +679,9 @@ async function handleNonStreamingResponse(
         } else if (!res.headersSent) {
           res.status(500).json({
             error: {
-              message: `Claude CLI exited with code ${code} without response`,
+              message: cliErrorMessage || `Claude CLI exited with code ${code} without response`,
               type: "server_error",
-              code: null,
+              code: cliErrorMessage ? "cli_error" : null,
             },
           });
         }
