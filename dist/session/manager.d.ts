@@ -58,6 +58,9 @@ declare class SessionManager {
     /**
      * Acquire a per-session lock so concurrent requests for the same
      * session are serialized. Returns a release function.
+     *
+     * Includes a safety timeout (10 min) to prevent permanent hangs
+     * if a lock holder crashes without releasing.
      */
     acquireLock(key: string): Promise<() => void>;
     /**

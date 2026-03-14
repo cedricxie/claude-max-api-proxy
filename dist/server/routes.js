@@ -429,8 +429,9 @@ async function handleStreamingResponse(res, subprocess, sessionInput, requestId)
             resolve();
         });
         subprocess.on("close", (code) => {
-            if (!res.writableEnded) {
-                if (code !== 0 && !isComplete) {
+            if (!isComplete && !res.writableEnded) {
+                // Only handle close if result handler didn't already finish the response
+                if (code !== 0) {
                     res.write(`data: ${JSON.stringify({
                         error: {
                             message: `Process exited with code ${code}`,

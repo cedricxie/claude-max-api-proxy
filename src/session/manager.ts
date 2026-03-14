@@ -62,7 +62,9 @@ class SessionManager {
   async save(): Promise<void> {
     this.saveQueue = this.saveQueue.then(async () => {
       const data = Object.fromEntries(this.sessions);
-      await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
+      await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2), {
+        mode: 0o600,
+      });
     }).catch((err) => {
       console.error("[SessionManager] Write error:", err);
     });
@@ -181,18 +183,48 @@ class SessionManager {
   /**
    * Acquire a per-session lock so concurrent requests for the same
    * session are serialized. Returns a release function.
+   *
+   * Includes a safety timeout (10 min) to prevent permanent hangs
+   * if a lock holder crashes without releasing.
    */
   async acquireLock(key: string): Promise<() => void> {
-    // Wait for any existing lock on this key
-    while (this.locks.has(key)) {
-      await this.locks.get(key);
+    const LOCK_TIMEOUT_MS = 600000; // 10 minutes
+
+    // Wait for any existing lock on this key, with timeout
+    if (this.locks.has(key)) {
+      await Promise.race([
+        this.locks.get(key),
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            console.error(`[SessionManager] Lock timeout for key "${key}" — forcing release`);
+            this.locks.delete(key);
+            resolve();
+          }, LOCK_TIMEOUT_MS);
+          timer.unref();
+          // Also resolve if the lock clears normally
+          this.locks.get(key)?.then(resolve);
+        }),
+      ]);
     }
+
     let release!: () => void;
     const promise = new Promise<void>((resolve) => {
       release = resolve;
     });
     this.locks.set(key, promise);
+
+    // Auto-release after timeout as a safety net
+    const autoRelease = setTimeout(() => {
+      if (this.locks.get(key) === promise) {
+        console.error(`[SessionManager] Auto-releasing stale lock for key "${key}"`);
+        this.locks.delete(key);
+        release();
+      }
+    }, LOCK_TIMEOUT_MS);
+    autoRelease.unref();
+
     return () => {
+      clearTimeout(autoRelease);
       this.locks.delete(key);
       release();
     };
