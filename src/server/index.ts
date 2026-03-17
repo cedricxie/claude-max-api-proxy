@@ -11,7 +11,9 @@ import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
 import { sessionReady } from "../session/manager.js";
 
 // Runtime feature detection: zstdDecompressSync is available in Node.js 22+.
-const zstdDecompressSync: ((buf: Buffer) => Buffer) | null =
+// The second options argument (e.g. maxOutputLength) exists at runtime but
+// is not yet reflected in @types/node, so we use a broad signature here.
+const zstdDecompressSync: ((buf: Buffer, opts?: Record<string, unknown>) => Buffer) | null =
   typeof (zlib as any).zstdDecompressSync === "function"
     ? (zlib as any).zstdDecompressSync
     : null;
@@ -49,34 +51,49 @@ function createApp(): Express {
         return;
       }
       let totalBytes = 0;
+      let aborted = false;
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => {
+        if (aborted) return;
         totalBytes += chunk.length;
         if (totalBytes > MAX_BODY_BYTES) {
-          req.destroy(new Error("Request body too large"));
+          aborted = true;
+          res.status(413).json({
+            error: {
+              message: "Request entity too large",
+              type: "invalid_request_error",
+              code: "entity_too_large",
+            },
+          });
+          req.resume(); // drain remaining data
           return;
         }
         chunks.push(chunk);
       });
       req.on("end", () => {
+        if (aborted) return;
         try {
           const compressed = Buffer.concat(chunks);
-          const decompressed = zstdDecompressSync!(compressed);
-          if (decompressed.length > MAX_BODY_BYTES) {
+          // Use maxOutputLength to cap decompressed size during decompression,
+          // preventing high-ratio zstd bombs from exhausting memory.
+          const decompressed = zstdDecompressSync!(compressed, {
+            maxOutputLength: MAX_BODY_BYTES,
+          });
+          req.body = JSON.parse(decompressed.toString());
+          delete req.headers["content-encoding"];
+          delete req.headers["content-length"];
+          next();
+        } catch (err: any) {
+          if (err?.code === "ERR_BUFFER_TOO_LARGE") {
             res.status(413).json({
               error: {
-                message: "Request entity too large",
+                message: "Decompressed request entity too large",
                 type: "invalid_request_error",
                 code: "entity_too_large",
               },
             });
             return;
           }
-          req.body = JSON.parse(decompressed.toString());
-          delete req.headers["content-encoding"];
-          delete req.headers["content-length"];
-          next();
-        } catch (err) {
           next(err);
         }
       });
