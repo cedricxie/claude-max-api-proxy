@@ -5,26 +5,60 @@
  */
 import express from "express";
 import { createServer } from "http";
-import { zstdDecompressSync } from "zlib";
+import * as zlib from "zlib";
 import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
 import { sessionReady } from "../session/manager.js";
+// Runtime feature detection: zstdDecompressSync is available in Node.js 22+.
+const zstdDecompressSync = typeof zlib.zstdDecompressSync === "function"
+    ? zlib.zstdDecompressSync
+    : null;
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB, matches express.json limit
 let serverInstance = null;
 /**
  * Create and configure the Express app
  */
 function createApp() {
     const app = express();
-    // Decompress zstd-encoded request bodies (Node.js 22+ native support).
+    // Decompress zstd-encoded request bodies.
     // Some OpenAI-compatible clients send Content-Encoding: zstd which
     // Express's built-in JSON parser does not handle.
-    app.use((req, _res, next) => {
+    // Falls back to a 415 error on Node < 22 where zstd is unavailable.
+    app.use((req, res, next) => {
         if (req.headers["content-encoding"] === "zstd") {
+            if (!zstdDecompressSync) {
+                res.status(415).json({
+                    error: {
+                        message: "zstd content-encoding is not supported on this Node.js version (requires 22+)",
+                        type: "invalid_request_error",
+                        code: "unsupported_content_encoding",
+                    },
+                });
+                return;
+            }
+            let totalBytes = 0;
             const chunks = [];
-            req.on("data", (chunk) => chunks.push(chunk));
+            req.on("data", (chunk) => {
+                totalBytes += chunk.length;
+                if (totalBytes > MAX_BODY_BYTES) {
+                    req.destroy(new Error("Request body too large"));
+                    return;
+                }
+                chunks.push(chunk);
+            });
             req.on("end", () => {
                 try {
                     const compressed = Buffer.concat(chunks);
                     const decompressed = zstdDecompressSync(compressed);
+                    if (decompressed.length > MAX_BODY_BYTES) {
+                        res.status(413).json({
+                            error: {
+                                message: "Request entity too large",
+                                type: "invalid_request_error",
+                                code: "entity_too_large",
+                            },
+                        });
+                        return;
+                    }
                     req.body = JSON.parse(decompressed.toString());
                     delete req.headers["content-encoding"];
                     delete req.headers["content-length"];
