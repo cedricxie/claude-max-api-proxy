@@ -5,6 +5,7 @@
  */
 import express from "express";
 import { createServer } from "http";
+import { zstdDecompressSync } from "zlib";
 import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
 import { sessionReady } from "../session/manager.js";
 let serverInstance = null;
@@ -13,6 +14,32 @@ let serverInstance = null;
  */
 function createApp() {
     const app = express();
+    // Decompress zstd-encoded request bodies (Node.js 22+ native support).
+    // Some OpenAI-compatible clients send Content-Encoding: zstd which
+    // Express's built-in JSON parser does not handle.
+    app.use((req, _res, next) => {
+        if (req.headers["content-encoding"] === "zstd") {
+            const chunks = [];
+            req.on("data", (chunk) => chunks.push(chunk));
+            req.on("end", () => {
+                try {
+                    const compressed = Buffer.concat(chunks);
+                    const decompressed = zstdDecompressSync(compressed);
+                    req.body = JSON.parse(decompressed.toString());
+                    delete req.headers["content-encoding"];
+                    delete req.headers["content-length"];
+                    next();
+                }
+                catch (err) {
+                    next(err);
+                }
+            });
+            req.on("error", next);
+        }
+        else {
+            next();
+        }
+    });
     // Middleware
     app.use(express.json({ limit: "10mb" }));
     // Request logging (debug mode)
