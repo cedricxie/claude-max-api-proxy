@@ -79,7 +79,18 @@ function createApp(): Express {
           const decompressed = zstdDecompressSync!(compressed, {
             maxOutputLength: MAX_BODY_BYTES,
           });
-          req.body = JSON.parse(decompressed.toString());
+          const parsed = JSON.parse(decompressed.toString());
+          if (parsed == null || typeof parsed !== "object") {
+            res.status(400).json({
+              error: {
+                message: "Request body must be a JSON object",
+                type: "invalid_request_error",
+                code: "invalid_body",
+              },
+            });
+            return;
+          }
+          req.body = parsed;
           delete req.headers["content-encoding"];
           delete req.headers["content-length"];
           next();
