@@ -24,6 +24,9 @@ export class ClaudeSubprocess extends EventEmitter {
      * Start the Claude CLI subprocess with the given prompt
      */
     async start(prompt, options) {
+        if (!prompt || !prompt.trim()) {
+            throw new Error("Empty prompt: nothing to send to Claude CLI");
+        }
         const args = this.buildArgs(options);
         const timeout = options.timeout || DEFAULT_TIMEOUT;
         return new Promise((resolve, reject) => {
